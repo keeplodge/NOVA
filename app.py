@@ -26,6 +26,31 @@ OBSIDIAN_TRADE_LOG_DIR  = os.environ.get(
 
 EST = ZoneInfo("America/New_York")
 
+# ── Eval accounts ─────────────────────────────────────────────────────────────
+EVAL_ACCOUNTS = {
+    "apex_50k":  {"label": "Apex 50K",   "current": 48598.30,  "target": 53000.00},
+    "apex_100k": {"label": "Apex 100K",  "current": 100000.00, "target": 106000.00},
+    "lucid_50k": {"label": "Lucid 50K",  "current": 50000.00,  "target": 53000.00},
+}
+
+def build_equity_data() -> list[dict]:
+    """Calculate progress and dollars remaining for each eval account."""
+    result = []
+    for account_id, acct in EVAL_ACCOUNTS.items():
+        current   = acct["current"]
+        target    = acct["target"]
+        remaining = round(target - current, 2)
+        progress  = round((current / target) * 100, 2) if target else 0.0
+        result.append({
+            "id":        account_id,
+            "label":     acct["label"],
+            "current":   current,
+            "target":    target,
+            "remaining": remaining,
+            "progress":  progress,
+        })
+    return result
+
 # ── Session windows (EST) ─────────────────────────────────────────────────────
 SESSIONS = {
     "Asia":   {"start": (19, 0),  "end": (22, 0)},
@@ -439,6 +464,42 @@ def report_loss():
     }), 200
 
 
+# ── Equity endpoint ───────────────────────────────────────────────────────────
+
+@app.route("/equity", methods=["GET"])
+def equity():
+    """Return current equity, target, progress %, and dollars remaining per account."""
+    return jsonify({
+        "status":   "ok",
+        "accounts": build_equity_data(),
+    }), 200
+
+
+@app.route("/equity/<account_id>", methods=["PATCH"])
+def update_equity(account_id):
+    """
+    Update current equity for one account.
+    Payload: { "current": 49100.00 }
+    """
+    if account_id not in EVAL_ACCOUNTS:
+        return jsonify({"status": "error", "message": f"Unknown account '{account_id}'"}), 404
+
+    try:
+        data    = request.get_json(force=True, silent=False)
+        current = float(data["current"])
+        if current < 0:
+            raise ValueError("current must be non-negative")
+    except (TypeError, KeyError, ValueError) as e:
+        return jsonify({"status": "error", "message": f"Invalid payload: {e}"}), 400
+
+    EVAL_ACCOUNTS[account_id]["current"] = current
+    logger.info(f"Equity updated — {account_id}: ${current:.2f}")
+
+    accounts = build_equity_data()
+    updated  = next(a for a in accounts if a["id"] == account_id)
+    return jsonify({"status": "ok", "account": updated}), 200
+
+
 # ── Status endpoint ───────────────────────────────────────────────────────────
 
 @app.route("/status", methods=["GET"])
@@ -455,6 +516,7 @@ def status():
         "loss_limit":     MAX_DAILY_LOSS,
         "loss_remaining": max(0.0, MAX_DAILY_LOSS - state["daily_loss"]),
         "last_signal":    state.get("last_signal"),
+        "equity":         build_equity_data(),
     }), 200
 
 
