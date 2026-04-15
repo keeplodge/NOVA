@@ -12,9 +12,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL")
-if not TRADERSPOST_WEBHOOK_URL:
-    raise RuntimeError("TRADERSPOST_WEBHOOK_URL environment variable is not set")
+TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL", "")
 MAX_TRADES_PER_SESSION = 1
 MAX_TRADES_PER_DAY     = 3
 MAX_DAILY_LOSS         = 500.00  # USD
@@ -131,6 +129,8 @@ def build_traderspost_payload(data: dict, session: str) -> dict:
 
 def forward_to_traderspost(payload: dict) -> tuple[bool, str]:
     """Forward the mapped payload to TradersPost."""
+    if not TRADERSPOST_WEBHOOK_URL:
+        return False, "TRADERSPOST_WEBHOOK_URL is not configured"
     try:
         response = requests.post(
             TRADERSPOST_WEBHOOK_URL,
