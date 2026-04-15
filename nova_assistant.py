@@ -27,7 +27,7 @@ load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = "766NdLzxBMJanRvWXtkt"          # Daniel British
+ELEVENLABS_VOICE_ID = "7p1Ofvcwsv7UBPoFNcpI"
 FINNHUB_API_KEY     = os.environ.get("FINNHUB_API_KEY", "")
 NEWSAPI_KEY         = os.environ.get("NEWSAPI_KEY", "")
 NOVA_SERVER_URL     = os.environ.get(
