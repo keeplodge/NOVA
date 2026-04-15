@@ -12,7 +12,9 @@ load_dotenv()
 app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-TRADERSPOST_WEBHOOK_URL = os.environ["TRADERSPOST_WEBHOOK_URL"]
+TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL")
+if not TRADERSPOST_WEBHOOK_URL:
+    raise RuntimeError("TRADERSPOST_WEBHOOK_URL environment variable is not set")
 MAX_TRADES_PER_SESSION = 1
 MAX_TRADES_PER_DAY     = 3
 MAX_DAILY_LOSS         = 500.00  # USD
