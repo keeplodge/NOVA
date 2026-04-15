@@ -16,7 +16,6 @@ env/
 
 # Logs
 *.log
-*.txt
 nova_logs.txt
 server.log
 flask.log
