@@ -307,22 +307,30 @@ def get_market_news(n: int = 3) -> list[str]:
     return []
 
 
-def get_world_news(n: int = 2) -> list[str]:
-    """Top N general world headlines."""
+def get_world_news(n: int = 2, exclude: list[str] | None = None) -> list[str]:
+    """
+    Top N general world headlines, deduped against the exclude list
+    so market and world sections never surface the same headline.
+    """
+    exclude_set = {h.lower() for h in (exclude or [])}
+
     if NEWSAPI_KEY:
         try:
             r = requests.get(
                 "https://newsapi.org/v2/top-headlines",
                 params={
                     "language": "en",
-                    "pageSize": n,
+                    "pageSize": n + 10,   # fetch extra to absorb duplicates
                     "apiKey":   NEWSAPI_KEY,
                 },
                 timeout=10,
             )
             r.raise_for_status()
-            articles = r.json().get("articles", [])
-            headlines = [a["title"] for a in articles if a.get("title")][:n]
+            articles  = r.json().get("articles", [])
+            headlines = [
+                a["title"] for a in articles
+                if a.get("title") and a["title"].lower() not in exclude_set
+            ][:n]
             if headlines:
                 return headlines
         except Exception as e:
@@ -334,7 +342,10 @@ def get_world_news(n: int = 2) -> list[str]:
         r.raise_for_status()
         root  = ET.fromstring(r.content)
         items = root.findall(".//item/title")
-        return [item.text for item in items if item.text][:n]
+        return [
+            item.text for item in items
+            if item.text and item.text.lower() not in exclude_set
+        ][:n]
     except Exception as e:
         logger.error(f"BBC RSS error: {e}")
 
@@ -649,13 +660,15 @@ def morning_briefing():
     else:
         speak("Market headlines unavailable.")
 
-    world_news = get_world_news(2)
+    world_news = get_world_news(2, exclude=market_news)
     if world_news:
         speak("Top world headlines.")
         for i, h in enumerate(world_news, 1):
             speak(f"{i}. {h}")
 
-    prop_news = get_topic_news("prop firm trading futures", 2)
+    prop_news = get_topic_news(
+        '"prop firm" AND (funded trader OR FTMO OR Topstep OR evaluation account OR futures trader)', 2
+    )
     if prop_news:
         speak("Prop firm industry news.")
         for i, h in enumerate(prop_news, 1):
