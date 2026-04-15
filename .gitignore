@@ -1,0 +1,41 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# Logs
+*.log
+*.txt
+nova_logs.txt
+server.log
+flask.log
+ngrok.log
+
+# OS
+.DS_Store
+Thumbs.db
+^
+
+# IDE / tools
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code internal
+.claude/
+
+# Obsidian / Nova Brain (local knowledge base — not for repo)
+Nova Brain/
+nova-brain/
