@@ -27,7 +27,7 @@ load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = "7p1Ofvcwsv7UBPoFNcpI"
+ELEVENLABS_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"          # Daniel — Steady Broadcaster (premade)
 FINNHUB_API_KEY     = os.environ.get("FINNHUB_KEY", "")
 NEWSAPI_KEY         = os.environ.get("NEWSAPI_KEY", "")
 NOVA_SERVER_URL     = os.environ.get(
