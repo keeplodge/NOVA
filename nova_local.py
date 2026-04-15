@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 # We import the module (not from), then patch speak() and listen_response()
 # so every briefing/alert call in nova_assistant routes through the GUI version.
 import nova_assistant
+from trading_agent import TradingAgent
 
 load_dotenv()
 
@@ -231,24 +232,7 @@ def eod_debrief():
     _run(nova_assistant.eod_debrief, "speaking", C_WHITE, "EOD debrief...")
 
 
-# ── Trade Monitor ──────────────────────────────────────────────────────────────
-
-def run_trade_monitor():
-    """Poll NOVA server every 30s — flash green when a new trade is detected."""
-    last_count = 0
-    while True:
-        try:
-            r = requests.get(f"{NOVA_SERVER_URL}/status", timeout=8)
-            if r.ok:
-                trades = r.json().get("trades_today", 0)
-                if trades > last_count:
-                    _push("trade", C_GREEN, f"Trade executed — {trades} trade(s) today")
-                    time.sleep(5)
-                    _push("listening", C_CYAN, "Listening...")
-                last_count = trades
-        except Exception:
-            pass
-        time.sleep(30)
+## run_trade_monitor replaced by TradingAgent (see main())
 
 
 # ── Wake Word Listener ─────────────────────────────────────────────────────────
@@ -796,11 +780,14 @@ def main():
             f"Say '{WAKE_PHRASE}' to activate me at any time."
         )
 
+    # ── Trading agent — trade detection, session watch, loss alerts ──────────
+    agent = TradingAgent(speak_fn=speak, push_gui_fn=_push, server_url=NOVA_SERVER_URL)
+    agent.start()
+
     for name, fn in [
-        ("startup",       _startup),
-        ("wake-word",     run_wake_word),
-        ("scheduler",     run_scheduler),
-        ("trade-monitor", run_trade_monitor),
+        ("startup",   _startup),
+        ("wake-word", run_wake_word),
+        ("scheduler", run_scheduler),
     ]:
         threading.Thread(target=fn, daemon=True, name=name).start()
 

@@ -39,6 +39,7 @@ state = {
     "trades_today":   0,
     "daily_loss":     0.0,
     "session_trades": {},
+    "last_signal":    None,   # {"action", "price", "session", "ticker"}
 }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -336,6 +337,12 @@ def webhook():
     # 9. Update state
     state["trades_today"] += 1
     state["session_trades"][session] = session_count + 1
+    state["last_signal"] = {
+        "action":  data["action"],
+        "price":   float(data["price"]),
+        "session": session,
+        "ticker":  data["ticker"].upper().strip(),
+    }
 
     logger.info(
         f"Signal forwarded — session: {session} | "
@@ -447,6 +454,7 @@ def status():
         "daily_loss":     state["daily_loss"],
         "loss_limit":     MAX_DAILY_LOSS,
         "loss_remaining": max(0.0, MAX_DAILY_LOSS - state["daily_loss"]),
+        "last_signal":    state.get("last_signal"),
     }), 200
 
 
