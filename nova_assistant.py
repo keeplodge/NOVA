@@ -28,7 +28,7 @@ load_dotenv()
 # ── Config ─────────────────────────────────────────────────────────────────────
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = "7p1Ofvcwsv7UBPoFNcpI"
-FINNHUB_API_KEY     = os.environ.get("FINNHUB_API_KEY", "")
+FINNHUB_API_KEY     = os.environ.get("FINNHUB_KEY", "")
 NEWSAPI_KEY         = os.environ.get("NEWSAPI_KEY", "")
 NOVA_SERVER_URL     = os.environ.get(
     "NOVA_SERVER_URL", "https://nova-production-72f5.up.railway.app"
@@ -72,7 +72,7 @@ def speak(text: str):
             },
             json={
                 "text": text,
-                "model_id": "eleven_monolingual_v1",
+                "model_id": "eleven_turbo_v2_5",
                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
             },
             timeout=20,
