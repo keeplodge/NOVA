@@ -55,48 +55,67 @@ logger = logging.getLogger(__name__)
 
 # ── Text-to-Speech ─────────────────────────────────────────────────────────────
 
+# Global lock — ensures only one speak() plays at a time across all threads
+_speak_lock = threading.Lock()
+
+# Initialise mixer once at startup rather than per-call
+pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
+pygame.mixer.init()
+
+
 def speak(text: str):
-    """Convert text to speech via ElevenLabs. Falls back to print if key missing."""
+    """
+    Convert text to speech via ElevenLabs and play it.
+    Thread-safe: acquires _speak_lock so concurrent calls queue instead of overlap.
+    Stops any active playback before loading the next clip.
+    Falls back to print if ELEVENLABS_API_KEY is missing.
+    """
     logger.info(f"[NOVA]: {text}")
 
     if not ELEVENLABS_API_KEY:
         print(f"\n[NOVA]: {text}\n")
         return
 
-    try:
-        response = requests.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
-            headers={
-                "xi-api-key": ELEVENLABS_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "text": text,
-                "model_id": "eleven_turbo_v2_5",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
+    with _speak_lock:
+        # Stop anything currently playing before we load the next clip
+        if pygame.mixer.music.get_busy():
+            pygame.mixer.music.stop()
 
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-            f.write(response.content)
-            tmp_path = f.name
+        tmp_path = None
+        try:
+            response = requests.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_turbo_v2_5",
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                },
+                timeout=20,
+            )
+            response.raise_for_status()
 
-        pygame.mixer.init()
-        pygame.mixer.music.load(tmp_path)
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            time.sleep(0.1)
-        pygame.mixer.quit()
-        os.unlink(tmp_path)
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                f.write(response.content)
+                tmp_path = f.name
 
-    except requests.exceptions.RequestException as e:
-        logger.error(f"ElevenLabs request error: {e}")
-        print(f"\n[NOVA]: {text}\n")
-    except Exception as e:
-        logger.error(f"TTS playback error: {e}")
-        print(f"\n[NOVA]: {text}\n")
+            pygame.mixer.music.load(tmp_path)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.1)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"ElevenLabs request error: {e}")
+            print(f"\n[NOVA]: {text}\n")
+        except Exception as e:
+            logger.error(f"TTS playback error: {e}")
+            print(f"\n[NOVA]: {text}\n")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
 
 # ── Voice Input ────────────────────────────────────────────────────────────────
