@@ -106,6 +106,7 @@ def speak(text: str):
             pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
                 time.sleep(0.1)
+            pygame.mixer.music.unload()  # release file handle before delete (Windows)
 
         except requests.exceptions.RequestException as e:
             logger.error(f"ElevenLabs request error: {e}")
