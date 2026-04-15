@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import glob
 import requests
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -13,17 +14,23 @@ app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL", "")
-MAX_TRADES_PER_SESSION = 1
-MAX_TRADES_PER_DAY     = 3
-MAX_DAILY_LOSS         = 500.00  # USD
+MAX_TRADES_PER_SESSION  = 1
+MAX_TRADES_PER_DAY      = 3
+MAX_DAILY_LOSS          = 500.00   # USD
+RISK_PER_TRADE          = 500.00   # USD
+REWARD_PER_TRADE        = 1000.00  # USD
+OBSIDIAN_TRADE_LOG_DIR  = os.environ.get(
+    "OBSIDIAN_TRADE_LOG_DIR",
+    r"C:\Users\User\nova\nova-brain\01_Trade_Logs",
+)
 
 EST = ZoneInfo("America/New_York")
 
 # ── Session windows (EST) ─────────────────────────────────────────────────────
 SESSIONS = {
-    "Asia":   {"start": (19, 0),  "end": (22, 0)},   # 7pm  – 10pm
-    "London": {"start": (2,  0),  "end": (5,  0)},   # 2am  – 5am
-    "NY_AM":  {"start": (8, 30),  "end": (11, 0)},   # 8:30am – 11am
+    "Asia":   {"start": (19, 0),  "end": (22, 0)},
+    "London": {"start": (2,  0),  "end": (5,  0)},
+    "NY_AM":  {"start": (8, 30),  "end": (11, 0)},
 }
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -69,7 +76,6 @@ def get_current_session(now: datetime) -> str | None:
 
 
 def validate_payload(data: dict) -> tuple[bool, str]:
-    """Validate required fields from the TradingView alert."""
     for field in ("ticker", "action", "price"):
         if field not in data:
             return False, f"Missing required field: '{field}'"
@@ -86,28 +92,10 @@ def validate_payload(data: dict) -> tuple[bool, str]:
 
 
 def build_traderspost_payload(data: dict, session: str) -> dict:
-    """
-    Map the incoming TradingView alert to the clean TradersPost format.
-
-    Expected TradingView fields:
-        ticker    — "NQ1!"
-        action    — "buy" | "sell"
-        quantity  — 1
-        orderType — "market"
-        price     — 19850.25
-        comment   — "first" | "cont"
-        session   — TradingView timestamp (logged only, not forwarded)
-
-    TradersPost output fields:
-        ticker, action, price, quantity, orderType, sentiment, comment
-    """
-    # Log the TradingView timestamp for reference — not forwarded to TradersPost
     tv_timestamp = data.get("session", "")
     if tv_timestamp:
         logger.info(f"TradingView session timestamp: {tv_timestamp}")
 
-    # Enrich comment with server-detected session name
-    # e.g. "first" → "first | NY_AM",  "cont" → "cont | Asia"
     raw_comment = str(data.get("comment", "")).strip()
     comment     = f"{raw_comment} | {session}" if raw_comment else session
 
@@ -128,7 +116,6 @@ def build_traderspost_payload(data: dict, session: str) -> dict:
 
 
 def forward_to_traderspost(payload: dict) -> tuple[bool, str]:
-    """Forward the mapped payload to TradersPost."""
     if not TRADERSPOST_WEBHOOK_URL:
         return False, "TRADERSPOST_WEBHOOK_URL is not configured"
     try:
@@ -148,6 +135,140 @@ def forward_to_traderspost(payload: dict) -> tuple[bool, str]:
         return False, f"TradersPost returned error: {e.response.status_code} — {e.response.text}"
     except Exception as e:
         return False, f"Unexpected error forwarding to TradersPost: {str(e)}"
+
+
+# ── Obsidian trade log ────────────────────────────────────────────────────────
+
+SESSION_DISPLAY = {"Asia": "Asia", "London": "London", "NY_AM": "NY AM"}
+SIDE_MAP        = {"buy": "long", "sell": "short"}
+TYPE_MAP        = {"first": "First entry", "cont": "Continuation", "continuation": "Continuation"}
+
+
+def _trade_log_path(now: datetime, session: str, side: str) -> str:
+    """Return the full path for a new trade log file."""
+    os.makedirs(OBSIDIAN_TRADE_LOG_DIR, exist_ok=True)
+    filename = now.strftime(f"%Y-%m-%d-%H-%M") + f"-{session.lower().replace('_', '')}-{side}.md"
+    return os.path.join(OBSIDIAN_TRADE_LOG_DIR, filename)
+
+
+def log_trade_to_obsidian(data: dict, session: str, now: datetime) -> str | None:
+    """
+    Write a new trade log markdown file to the Obsidian vault.
+    Returns the file path on success, None on failure.
+    """
+    side        = SIDE_MAP.get(data["action"], data["action"])
+    raw_comment = str(data.get("comment", "")).strip().lower()
+    trade_type  = TYPE_MAP.get(raw_comment, raw_comment.capitalize() if raw_comment else "First entry")
+    entry_price = float(data["price"])
+    session_label = SESSION_DISPLAY.get(session, session)
+
+    # Derive stop/TP from fixed risk/reward (10-point NQ = $200, so 25pt stop / 50pt TP at 1 contract)
+    # Use values from payload if provided, otherwise leave as TBD
+    stop_loss   = data.get("stop_loss",   "TBD")
+    take_profit = data.get("take_profit", "TBD")
+
+    content = f"""# Trade Log — {now.strftime("%Y-%m-%d %H:%M")} EST
+
+**Date:** {now.strftime("%Y-%m-%d")}
+**Time:** {now.strftime("%H:%M")} EST
+**Session:** {session_label}
+**Side:** {side.capitalize()}
+**Type:** {trade_type}
+
+---
+
+## Entry
+
+| Field        | Value         |
+|--------------|---------------|
+| Entry Price  | {entry_price} |
+| Stop Loss    | {stop_loss}   |
+| Take Profit  | {take_profit} |
+| Risk         | ${RISK_PER_TRADE:.0f}       |
+| Reward       | ${REWARD_PER_TRADE:.0f}      |
+| R:R          | 1:2           |
+
+---
+
+## Result
+
+| Field       | Value  |
+|-------------|--------|
+| Status      | Open   |
+| Exit Price  | —      |
+| Outcome     | —      |
+| P&L         | —      |
+
+---
+
+## Notes
+
+_Add post-trade notes here._
+"""
+
+    path = _trade_log_path(now, session, side)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info(f"Obsidian trade log created: {path}")
+        return path
+    except Exception as e:
+        logger.error(f"Failed to write Obsidian trade log: {e}")
+        return None
+
+
+def find_latest_open_trade_log() -> str | None:
+    """Return the path of the most recent trade log with Status: Open, or None."""
+    pattern = os.path.join(OBSIDIAN_TRADE_LOG_DIR, "*.md")
+    files   = sorted(glob.glob(pattern), reverse=True)
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            if "| Status      | Open   |" in content:
+                return path
+        except Exception:
+            continue
+    return None
+
+
+def update_trade_log_result(path: str, outcome: str, exit_price: float) -> bool:
+    """Update the Result table in an existing trade log file."""
+    outcome_map = {"win": "Win", "loss": "Loss", "be": "Breakeven"}
+    pnl_map     = {"win": f"+${REWARD_PER_TRADE:.0f}", "loss": f"-${RISK_PER_TRADE:.0f}", "be": "$0"}
+
+    outcome_label = outcome_map.get(outcome, outcome.capitalize())
+    pnl_label     = pnl_map.get(outcome, "—")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        content = content.replace(
+            "| Status      | Open   |",
+            f"| Status      | Closed |",
+        )
+        content = content.replace(
+            "| Exit Price  | —      |",
+            f"| Exit Price  | {exit_price} |",
+        )
+        content = content.replace(
+            "| Outcome     | —      |",
+            f"| Outcome     | {outcome_label} |",
+        )
+        content = content.replace(
+            "| P&L         | —      |",
+            f"| P&L         | {pnl_label} |",
+        )
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        logger.info(f"Obsidian trade log updated: {path} — {outcome_label} @ {exit_price}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to update Obsidian trade log: {e}")
+        return False
 
 
 # ── Webhook endpoint ──────────────────────────────────────────────────────────
@@ -223,6 +344,9 @@ def webhook():
         f"daily loss: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f}"
     )
 
+    # 10. Log trade to Obsidian
+    log_path = log_trade_to_obsidian(data, session, now)
+
     return jsonify({
         "status":         "ok",
         "message":        "Signal accepted and forwarded",
@@ -230,6 +354,56 @@ def webhook():
         "trades_today":   state["trades_today"],
         "session_trades": state["session_trades"][session],
         "daily_loss":     state["daily_loss"],
+        "trade_log":      log_path or "failed to write",
+    }), 200
+
+
+# ── Report result endpoint ────────────────────────────────────────────────────
+
+@app.route("/report-result", methods=["POST"])
+def report_result():
+    """
+    Payload: { "outcome": "win" | "loss" | "be", "exit_price": 21550.00 }
+    Finds the most recent open trade log and updates it with the result.
+    """
+    try:
+        data = request.get_json(force=True, silent=False)
+        if data is None:
+            raise ValueError("Empty body")
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Invalid JSON: {e}"}), 400
+
+    outcome    = str(data.get("outcome", "")).strip().lower()
+    exit_price = data.get("exit_price")
+
+    if outcome not in ("win", "loss", "be"):
+        return jsonify({"status": "error", "message": "outcome must be 'win', 'loss', or 'be'"}), 400
+
+    try:
+        exit_price = float(exit_price)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "exit_price must be a number"}), 400
+
+    path = find_latest_open_trade_log()
+    if not path:
+        return jsonify({"status": "error", "message": "No open trade log found"}), 404
+
+    success = update_trade_log_result(path, outcome, exit_price)
+    if not success:
+        return jsonify({"status": "error", "message": "Failed to update trade log"}), 500
+
+    # Update daily loss state if trade was a loss
+    if outcome == "loss":
+        reset_daily_state_if_new_day()
+        state["daily_loss"] += RISK_PER_TRADE
+        logger.info(f"Daily loss updated: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f}")
+
+    return jsonify({
+        "status":     "ok",
+        "message":    "Trade log updated",
+        "outcome":    outcome,
+        "exit_price": exit_price,
+        "log_file":   os.path.basename(path),
     }), 200
 
 
@@ -251,10 +425,10 @@ def report_loss():
     logger.info(f"Loss reported: ${loss:.2f} | Total daily loss: ${state['daily_loss']:.2f}")
 
     return jsonify({
-        "status":    "ok",
-        "daily_loss": state["daily_loss"],
-        "limit":      MAX_DAILY_LOSS,
-        "remaining":  max(0.0, MAX_DAILY_LOSS - state["daily_loss"]),
+        "status":     "ok",
+        "daily_loss":  state["daily_loss"],
+        "limit":       MAX_DAILY_LOSS,
+        "remaining":   max(0.0, MAX_DAILY_LOSS - state["daily_loss"]),
     }), 200
 
 
