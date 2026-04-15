@@ -34,7 +34,7 @@ load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = "7p1Ofvcwsv7UBPoFNcpI"
+ELEVENLABS_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"   # Daniel — Steady Broadcaster (free tier)
 WAKE_PHRASE         = "alright nova lets cook"
 NOVA_SERVER_URL     = os.environ.get(
     "NOVA_SERVER_URL", "https://nova-production-72f5.up.railway.app"
@@ -209,10 +209,26 @@ def run_trade_monitor():
 # ── Wake Word Listener ─────────────────────────────────────────────────────────
 
 def run_wake_word():
+    # pyaudio is required for microphone access — requires C++ Build Tools on Windows
+    # If missing, wake word is disabled but all scheduled briefings still run
+    try:
+        import pyaudio  # noqa: F401 — test availability before binding mic
+    except (ImportError, OSError):
+        msg = "Microphone unavailable — pyaudio not installed. Scheduled briefings still active."
+        logger.warning(msg)
+        _push("idle", C_CYAN, "Mic unavailable — scheduled mode only")
+        return
+
     recognizer = sr.Recognizer()
     recognizer.energy_threshold         = 3000
     recognizer.dynamic_energy_threshold = True
-    mic = sr.Microphone()
+
+    try:
+        mic = sr.Microphone()
+    except Exception as e:
+        logger.error(f"Microphone init failed: {e}")
+        _push("idle", C_CYAN, "Mic unavailable — scheduled mode only")
+        return
 
     with mic as source:
         recognizer.adjust_for_ambient_noise(source, duration=2)
