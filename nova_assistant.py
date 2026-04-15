@@ -16,9 +16,11 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pygame
 import requests
 import schedule
+import sounddevice as sd
 import speech_recognition as sr
 import yfinance as yf
 from dotenv import load_dotenv
@@ -33,7 +35,7 @@ NEWSAPI_KEY         = os.environ.get("NEWSAPI_KEY", "")
 NOVA_SERVER_URL     = os.environ.get(
     "NOVA_SERVER_URL", "https://nova-production-72f5.up.railway.app"
 )
-WAKE_PHRASE = "alright nova lets cook"
+WAKE_PHRASE = "nova"
 EST         = ZoneInfo("America/New_York")
 
 NQ_TECH_NAMES = {
@@ -42,11 +44,12 @@ NQ_TECH_NAMES = {
 }
 
 # ── Logging ────────────────────────────────────────────────────────────────────
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nova_assistant.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("nova_assistant.log"),
+        logging.FileHandler(_LOG_PATH),
         logging.StreamHandler(),
     ],
 )
@@ -121,26 +124,45 @@ def speak(text: str):
 
 # ── Voice Input ────────────────────────────────────────────────────────────────
 
+SAMPLE_RATE = 16000   # Hz — matches Google STT expectation
+
+
+def _capture_audio(duration: float) -> sr.AudioData:
+    """
+    Record `duration` seconds from the default mic using sounddevice.
+    Returns an sr.AudioData object compatible with recognizer.recognize_google().
+    No pyaudio required.
+    """
+    samples = sd.rec(
+        int(duration * SAMPLE_RATE),
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="int16",
+    )
+    sd.wait()
+    return sr.AudioData(samples.tobytes(), SAMPLE_RATE, 2)  # 2 bytes = int16
+
+
 def listen_response(timeout: int = 15) -> str:
     """
-    Listen for a spoken response and return the transcribed text.
-    Returns empty string if nothing is heard or pyaudio is unavailable.
+    Record up to `timeout` seconds and transcribe via Google STT.
+    Uses sounddevice — no pyaudio required.
+    Returns empty string on silence or error.
     """
     try:
         recognizer = sr.Recognizer()
-        mic        = sr.Microphone()
-        with mic as source:
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=20)
-        text = recognizer.recognize_google(audio).lower()
+        audio = _capture_audio(float(timeout))
+        text  = recognizer.recognize_google(audio).lower()
         logger.info(f"Response heard: {text}")
         return text
-    except sr.WaitTimeoutError:
-        return ""
     except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as e:
+        logger.error(f"STT request error: {e}")
         return ""
     except Exception as e:
         logger.error(f"listen_response error: {e}")
+        return ""
         return ""
 
 
@@ -868,35 +890,27 @@ def eod_debrief():
 # ── Wake Word Listener ─────────────────────────────────────────────────────────
 
 def listen_for_wake_word():
-    """Continuously listen for the wake phrase and activate on detection."""
+    """
+    Continuously listen for the wake phrase using sounddevice (no pyaudio needed).
+    Records 4-second windows and submits each to Google STT.
+    """
     recognizer = sr.Recognizer()
-    recognizer.energy_threshold         = 3000
-    recognizer.dynamic_energy_threshold = True
-    mic = sr.Microphone()
-
     logger.info(f"Wake word listener active. Say: '{WAKE_PHRASE}'")
-
-    with mic as source:
-        recognizer.adjust_for_ambient_noise(source, duration=2)
 
     while True:
         try:
-            with mic as source:
-                audio = recognizer.listen(source, timeout=5, phrase_time_limit=8)
-
-            text = recognizer.recognize_google(audio).lower()
+            audio = _capture_audio(4.0)
+            text  = recognizer.recognize_google(audio).lower()
             logger.info(f"Heard: {text}")
 
             if WAKE_PHRASE in text:
                 logger.info("Wake word detected")
                 speak("Sir. Ready. What do you need?")
 
-        except sr.WaitTimeoutError:
-            pass
         except sr.UnknownValueError:
-            pass
+            pass   # silence or unintelligible — keep looping
         except sr.RequestError as e:
-            logger.error(f"Speech recognition service error: {e}")
+            logger.error(f"STT service error: {e}")
             time.sleep(5)
         except Exception as e:
             logger.error(f"Wake word listener error: {e}")
