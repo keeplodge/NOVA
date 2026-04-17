@@ -21,6 +21,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+from nova_trade_db import insert_trade
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 NOVA_SERVER_URL    = os.environ.get(
@@ -260,6 +261,14 @@ class TradingAgent:
         log_path = _write_trade_log(session, last_signal, now)
         if log_path:
             logger.info(f"[trading_agent] Obsidian log: {os.path.basename(log_path)}")
+
+        # Log to local trade DB with full context from last_signal
+        if last_signal:
+            try:
+                trade_id = insert_trade(last_signal, session, now)
+                logger.info(f"[trading_agent] trade DB #{trade_id} — {session} {last_signal.get('action')} @ {last_signal.get('price')}")
+            except Exception as e:
+                logger.error(f"[trading_agent] trade DB write failed: {e}")
 
         # Return waveform to listening after 5 seconds
         threading.Timer(

@@ -367,6 +367,12 @@ def webhook():
         "price":   float(data["price"]),
         "session": session,
         "ticker":  data["ticker"].upper().strip(),
+        "sl":      float(data["sl"])    if data.get("sl")    else None,
+        "tp":      float(data["tp"])    if data.get("tp")    else None,
+        "be":      float(data["be"])    if data.get("be")    else None,
+        "grade":   data.get("grade"),
+        "score":   int(data["score"])   if data.get("score") else None,
+        "sweep":   data.get("sweep"),
     }
 
     logger.info(

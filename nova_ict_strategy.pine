@@ -1,0 +1,220 @@
+//@version=5
+strategy("NOVA ICT - London and NY AM", shorttitle="NOVA ICT", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         initial_capital=50000, calc_on_every_tick=true,
+         process_orders_on_close=false, max_boxes_count=500)
+
+// Inputs
+i_london = input.session("0200-0500", "London Session", group="Sessions")
+i_ny     = input.session("0830-1100", "NY AM Session",  group="Sessions")
+i_asia   = input.session("1900-0000", "Asian Range",    group="Sessions")
+i_tz     = "America/New_York"
+i_swing  = input.int(5,    "Swing Length",     minval=2, maxval=20, group="Structure")
+i_bpd    = input.int(288,  "PDH/L Bars",       minval=60, maxval=1440, group="Structure")
+i_buf    = input.float(2.0, "SL Buffer (pts)", minval=0.5, step=0.5,  group="Structure")
+i_rr     = input.float(2.0, "Target R:R",      minval=1.0, step=0.5,  group="Structure")
+i_be     = input.float(1.0, "BE at (R)",       minval=0.5, step=0.25, group="Structure")
+i_sfvg   = input.bool(true, "Show FVGs",    group="Display")
+i_ssw    = input.bool(true, "Show Sweeps",  group="Display")
+i_sgrd   = input.bool(true, "Show Grader", group="Display")
+
+// Sessions
+in_lon = not na(time(timeframe.period, i_london, i_tz))
+in_ny  = not na(time(timeframe.period, i_ny,  i_tz))
+in_asi = not na(time(timeframe.period, i_asia, i_tz))
+in_ses = in_lon or in_ny
+ses_lbl = in_lon ? "London" : in_ny ? "NY_AM" : "-"
+lon_open = in_lon and not in_lon[1]
+lon_end  = not in_lon and in_lon[1]
+ny_end   = not in_ny and in_ny[1]
+ses_end  = (lon_end or ny_end) and strategy.position_size != 0
+
+// Previous day high/low
+var float pdh = na
+var float pdl = na
+if ta.change(time("D")) != 0
+    pdh := ta.highest(high, i_bpd)[1]
+    pdl := ta.lowest(low, i_bpd)[1]
+
+// Asian range
+var float asi_h = na
+var float asi_l = na
+var float ar_h  = na
+var float ar_l  = na
+if in_asi
+    asi_h := na(asi_h) ? high : math.max(asi_h, high)
+    asi_l := na(asi_l) ? low  : math.min(asi_l, low)
+if lon_open
+    ar_h := asi_h
+    ar_l := asi_l
+    asi_h := na
+    asi_l := na
+
+// Swing pivots
+ph = ta.pivothigh(high, i_swing, i_swing)
+pl = ta.pivotlow(low, i_swing, i_swing)
+var float lph = na
+var float lpl = na
+if not na(ph)
+    lph := ph
+if not na(pl)
+    lpl := pl
+
+// Liquidity sweeps
+sw_bull = in_ses and ((not na(lpl) and low < lpl and close > lpl) or (not na(pdl) and low < pdl and close > pdl) or (not na(ar_l) and low < ar_l and close > ar_l))
+sw_bear = in_ses and ((not na(lph) and high > lph and close < lph) or (not na(pdh) and high > pdh and close < pdh) or (not na(ar_h) and high > ar_h and close < ar_h))
+
+var float  sw_lo     = na
+var float  sw_hi     = na
+var string sweep_type = "Swing"
+
+if sw_bull
+    sw_lo      := low
+    sweep_type := not na(pdl) and low < pdl ? "PDL" : not na(ar_l) and low < ar_l ? "AR_Low" : "Swing_Low"
+if sw_bear
+    sw_hi      := high
+    sweep_type := not na(pdh) and high > pdh ? "PDH" : not na(ar_h) and high > ar_h ? "AR_High" : "Swing_High"
+
+// MSS - break of structure after sweep
+var int bull_bar = 0
+var int bear_bar = 0
+if sw_bull
+    bull_bar := bar_index
+if sw_bear
+    bear_bar := bar_index
+
+bull_mss = bar_index - bull_bar <= 30 and not na(lph) and close > lph and not na(sw_lo)
+bear_mss = bar_index - bear_bar <= 30 and not na(lpl) and close < lpl and not na(sw_hi)
+
+// FVG - persistent state, active for 10 bars
+var bool  bfvg_active = false
+var float bfvg_hi     = na
+var float bfvg_lo     = na
+var bool  sfvg_active = false
+var float sfvg_hi     = na
+var float sfvg_lo     = na
+
+bfok_cur = low > high[2] and (low - high[2]) / close >= 0.0005
+sfok_cur = high < low[2] and (low[2] - high) / close >= 0.0005
+
+if bfok_cur
+    bfvg_active := true
+    bfvg_hi     := low
+    bfvg_lo     := high[2]
+if sfok_cur
+    sfvg_active := true
+    sfvg_hi     := low[2]
+    sfvg_lo     := high
+
+// Entry signals
+long_sig  = in_ses and bull_mss and bfvg_active and strategy.position_size == 0
+short_sig = in_ses and bear_mss and sfvg_active and strategy.position_size == 0
+
+if long_sig
+    bfvg_active := false
+if short_sig
+    sfvg_active := false
+
+// Reset FVG after 10 bars
+var int bfvg_bar = 0
+var int sfvg_bar = 0
+if bfok_cur
+    bfvg_bar := bar_index
+if sfok_cur
+    sfvg_bar := bar_index
+if bar_index - bfvg_bar > 10
+    bfvg_active := false
+if bar_index - sfvg_bar > 10
+    sfvg_active := false
+
+// Trade Grader
+var table gt = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 50), border_width=1)
+var int    gs = 0
+var string gl = "C"
+
+if long_sig or short_sig
+    sc = 0
+    sc := not na(sw_lo) or not na(sw_hi) ? sc + 2 : sc
+    sc := bull_mss or bear_mss ? sc + 2 : sc
+    sc := bfok_cur or sfok_cur ? sc + 2 : sc
+    sc := in_ses ? sc + 2 : sc
+    gs := sc
+    gl := sc >= 8 ? "A+" : sc >= 6 ? "A" : sc >= 4 ? "B" : "C"
+
+gc = gl == "A+" ? color.lime : gl == "A" ? color.green : gl == "B" ? color.orange : color.red
+
+// Trade management
+var float esl = na
+var float etp = na
+var float ebe = na
+
+if long_sig
+    dist  = close - (sw_lo - i_buf)
+    esl  := sw_lo - i_buf
+    etp  := close + dist * i_rr
+    ebe  := close + dist * i_be
+    strategy.entry("Long", strategy.long)
+    alert('{"ticker":"' + syminfo.ticker + '","action":"buy","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"FVG_LONG"}', alert.freq_once_per_bar_close)
+
+if short_sig
+    dist  = (sw_hi + i_buf) - close
+    esl  := sw_hi + i_buf
+    etp  := close - dist * i_rr
+    ebe  := close - dist * i_be
+    strategy.entry("Short", strategy.short)
+    alert('{"ticker":"' + syminfo.ticker + '","action":"sell","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"FVG_SHORT"}', alert.freq_once_per_bar_close)
+
+if strategy.position_size > 0
+    if close >= ebe
+        esl := strategy.position_avg_price
+    strategy.exit("LX", "Long", stop=esl, limit=etp)
+
+if strategy.position_size < 0
+    if close <= ebe
+        esl := strategy.position_avg_price
+    strategy.exit("SX", "Short", stop=esl, limit=etp)
+
+if ses_end
+    strategy.close_all(comment="Session Close")
+    esl := na
+    etp := na
+    ebe := na
+
+// Grader display
+if i_sgrd
+    table.cell(gt, 0, 0, "NOVA GRADER",    text_color=color.white,  bgcolor=color.navy, text_size=size.small)
+    table.cell(gt, 1, 0, "",               text_color=color.white,  bgcolor=color.navy)
+    table.cell(gt, 0, 1, "Grade",          text_color=color.gray,   text_size=size.small)
+    table.cell(gt, 1, 1, gl,               text_color=gc,           text_size=size.large)
+    table.cell(gt, 0, 2, "Score",          text_color=color.gray,   text_size=size.small)
+    table.cell(gt, 1, 2, str.tostring(gs) + "/10", text_color=color.white, text_size=size.small)
+    table.cell(gt, 0, 3, "Session",        text_color=color.gray,   text_size=size.small)
+    table.cell(gt, 1, 3, ses_lbl,          text_color=color.yellow, text_size=size.small)
+    table.cell(gt, 0, 4, "Side",           text_color=color.gray,   text_size=size.small)
+    table.cell(gt, 1, 4, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "-", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
+
+// Visuals
+bgcolor(in_lon ? color.new(color.blue,  95) : na, title="London BG")
+bgcolor(in_ny  ? color.new(color.green, 95) : na, title="NY AM BG")
+
+plot(not na(pdh) ? pdh : na, "PDH", color.new(color.orange, 40), 1)
+plot(not na(pdl) ? pdl : na, "PDL", color.new(color.orange, 40), 1)
+plot(not na(ar_h) ? ar_h : na, "AR High", color.new(color.purple, 50), 1)
+plot(not na(ar_l) ? ar_l : na, "AR Low",  color.new(color.purple, 50), 1)
+
+plotshape(i_ssw and sw_bull, "Bull Sweep", shape.triangleup,   location.belowbar, color.new(color.aqua, 0), size=size.small)
+plotshape(i_ssw and sw_bear, "Bear Sweep", shape.triangledown, location.abovebar, color.new(color.red,  0), size=size.small)
+plotshape(bull_mss, "MSS Bull", shape.labelup,   location.belowbar, color.new(color.lime, 0), text="MSS", textcolor=color.black, size=size.tiny)
+plotshape(bear_mss, "MSS Bear", shape.labeldown, location.abovebar, color.new(color.red,  0), text="MSS", textcolor=color.white, size=size.tiny)
+
+if i_sfvg and bfok_cur
+    box.new(bar_index, low, bar_index + 30, high[2], border_color=color.new(color.lime, 60), bgcolor=color.new(color.lime, 88), border_width=1, text="FVG", text_color=color.new(color.lime, 20), text_size=size.tiny)
+if i_sfvg and sfok_cur
+    box.new(bar_index, high, bar_index + 30, low[2], border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 88), border_width=1, text="FVG", text_color=color.new(color.red, 20), text_size=size.tiny)
+
+plotshape(long_sig,  "Long Entry",  shape.arrowup,   location.belowbar, color.lime, size=size.normal)
+plotshape(short_sig, "Short Entry", shape.arrowdown, location.abovebar, color.red,  size=size.normal)
+
+plot(strategy.position_size != 0 and not na(esl) ? esl : na, "SL", color.new(color.red,    20), 1, plot.style_linebr)
+plot(strategy.position_size != 0 and not na(etp) ? etp : na, "TP", color.new(color.lime,   20), 1, plot.style_linebr)
+plot(strategy.position_size != 0 and not na(ebe) ? ebe : na, "BE", color.new(color.yellow, 40), 1, plot.style_linebr)
