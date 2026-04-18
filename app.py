@@ -24,6 +24,11 @@ OBSIDIAN_TRADE_LOG_DIR  = os.environ.get(
     r"C:\Users\User\nova\nova-brain\01_Trade_Logs",
 )
 
+# Grades that are allowed to execute through /webhook and /execute.
+# Pine grader only fires A+/A trades anyway, but /execute is callable
+# directly from Claude so this is the second gate.
+EXECUTABLE_GRADES = {"A+", "A"}
+
 EST = ZoneInfo("America/New_York")
 
 # ── Eval accounts ─────────────────────────────────────────────────────────────
@@ -53,18 +58,22 @@ def build_equity_data() -> list[dict]:
 
 # ── Session windows (EST) ─────────────────────────────────────────────────────
 SESSIONS = {
-    "Asia":   {"start": (19, 0),  "end": (22, 0)},
+    "Asia":   {"start": (19, 0),  "end": (23, 0)},
     "London": {"start": (2,  0),  "end": (5,  0)},
     "NY_AM":  {"start": (8, 30),  "end": (11, 0)},
 }
 
+# Crypto tickers — accepted on weekends when futures are closed
+CRYPTO_TICKERS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BTCUSD", "ETHUSD", "SOLUSD", "XBTUSD"}
+
 # ── In-memory state ───────────────────────────────────────────────────────────
 state = {
-    "date":           None,
-    "trades_today":   0,
-    "daily_loss":     0.0,
-    "session_trades": {},
-    "last_signal":    None,   # {"action", "price", "session", "ticker"}
+    "date":            None,
+    "trades_today":    0,
+    "daily_loss":      0.0,
+    "session_trades":  {},
+    "last_signal":     None,   # {"action", "price", "session", "ticker"}
+    "open_positions":  {},     # keyed by ticker → full signal dict at entry
 }
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -89,6 +98,9 @@ def reset_daily_state_if_new_day():
         state["trades_today"]   = 0
         state["daily_loss"]     = 0.0
         state["session_trades"] = {s: 0 for s in SESSIONS}
+        # open_positions is intentionally NOT reset on day rollover — a position
+        # held across a day boundary (rare but possible) should survive. It's
+        # cleared only by /close, /report-result, or an explicit admin call.
 
 
 def get_current_session(now: datetime) -> str | None:
@@ -141,6 +153,17 @@ def build_traderspost_payload(data: dict, session: str) -> dict:
     return payload
 
 
+def build_traderspost_close(ticker: str, comment: str = "") -> dict:
+    """TradersPost uses action=exit to close an existing position for a ticker."""
+    payload = {
+        "ticker":  ticker.upper().strip(),
+        "action":  "exit",
+        "comment": comment or "NOVA manual close",
+    }
+    logger.info(f"TradersPost close payload: {json.dumps(payload)}")
+    return payload
+
+
 def forward_to_traderspost(payload: dict) -> tuple[bool, str]:
     if not TRADERSPOST_WEBHOOK_URL:
         return False, "TRADERSPOST_WEBHOOK_URL is not configured"
@@ -188,10 +211,8 @@ def log_trade_to_obsidian(data: dict, session: str, now: datetime) -> str | None
     entry_price = float(data["price"])
     session_label = SESSION_DISPLAY.get(session, session)
 
-    # Derive stop/TP from fixed risk/reward (10-point NQ = $200, so 25pt stop / 50pt TP at 1 contract)
-    # Use values from payload if provided, otherwise leave as TBD
-    stop_loss   = data.get("stop_loss",   "TBD")
-    take_profit = data.get("take_profit", "TBD")
+    stop_loss   = data.get("stop_loss",   data.get("sl", "TBD"))
+    take_profit = data.get("take_profit", data.get("tp", "TBD"))
 
     content = f"""# Trade Log — {now.strftime("%Y-%m-%d %H:%M")} EST
 
@@ -297,6 +318,46 @@ def update_trade_log_result(path: str, outcome: str, exit_price: float) -> bool:
         return False
 
 
+# ── Gate evaluator (shared by /webhook and /execute) ──────────────────────────
+
+def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool, str, dict]:
+    """
+    Run every risk gate. Returns (ok, reason_if_blocked, gate_state).
+    gate_state is always populated for dry-run reporting.
+    """
+    is_crypto  = ticker.upper() in CRYPTO_TICKERS
+    is_weekend = now.weekday() >= 5
+    session    = get_current_session(now)
+    session_count = state["session_trades"].get(session, 0) if session else 0
+
+    gate_state = {
+        "now_est":         now.strftime("%Y-%m-%d %H:%M:%S"),
+        "session":         session,
+        "is_weekend":      is_weekend,
+        "is_crypto":       is_crypto,
+        "session_trades":  session_count,
+        "trades_today":    state["trades_today"],
+        "daily_loss":      state["daily_loss"],
+        "open_position":   ticker.upper() in state["open_positions"],
+        "grade":           grade,
+    }
+
+    if is_weekend and not is_crypto:
+        return False, f"Rejected — futures market closed on weekend ({ticker})", gate_state
+    if session is None:
+        return False, f"Rejected — outside all trading sessions ({now.strftime('%H:%M %Z')})", gate_state
+    if session_count >= MAX_TRADES_PER_SESSION:
+        return False, f"Rejected — max {MAX_TRADES_PER_SESSION} trade(s) already in {session}", gate_state
+    if state["trades_today"] >= MAX_TRADES_PER_DAY:
+        return False, f"Rejected — daily trade limit of {MAX_TRADES_PER_DAY} reached", gate_state
+    if state["daily_loss"] >= MAX_DAILY_LOSS:
+        return False, f"Rejected — daily loss limit of ${MAX_DAILY_LOSS:.2f} reached", gate_state
+    if ticker.upper() in state["open_positions"]:
+        return False, f"Rejected — position already open for {ticker.upper()}", gate_state
+
+    return True, "OK", gate_state
+
+
 # ── Webhook endpoint ──────────────────────────────────────────────────────────
 
 @app.route("/webhook", methods=["POST"])
@@ -324,33 +385,16 @@ def webhook():
     # 3. Reset daily state if new day
     reset_daily_state_if_new_day()
 
-    # 4. Session check
-    session = get_current_session(now)
-    if session is None:
-        msg = f"Signal rejected — outside all trading sessions ({now.strftime('%H:%M %Z')})"
-        logger.warning(msg)
-        return jsonify({"status": "rejected", "message": msg}), 200
+    # 4-7. Session / limit / loss gates
+    ticker = data.get("ticker", "").upper().strip()
+    grade  = data.get("grade")
+    ok, reason, gate_state = evaluate_gates(ticker, grade, now)
+    if not ok:
+        logger.warning(reason)
+        return jsonify({"status": "rejected", "message": reason, "gates": gate_state}), 200
 
+    session = gate_state["session"]
     logger.info(f"Active session: {session}")
-
-    # 5. Per-session trade limit
-    session_count = state["session_trades"].get(session, 0)
-    if session_count >= MAX_TRADES_PER_SESSION:
-        msg = f"Signal rejected — max {MAX_TRADES_PER_SESSION} trade(s) already taken in {session} session"
-        logger.warning(msg)
-        return jsonify({"status": "rejected", "message": msg}), 200
-
-    # 6. Daily trade limit
-    if state["trades_today"] >= MAX_TRADES_PER_DAY:
-        msg = f"Signal rejected — daily trade limit of {MAX_TRADES_PER_DAY} reached"
-        logger.warning(msg)
-        return jsonify({"status": "rejected", "message": msg}), 200
-
-    # 7. Daily loss limit
-    if state["daily_loss"] >= MAX_DAILY_LOSS:
-        msg = f"Signal rejected — daily loss limit of ${MAX_DAILY_LOSS:.2f} reached (current: ${state['daily_loss']:.2f})"
-        logger.warning(msg)
-        return jsonify({"status": "rejected", "message": msg}), 200
 
     # 8. Build clean TradersPost payload and forward
     tp_payload = build_traderspost_payload(data, session)
@@ -361,19 +405,21 @@ def webhook():
 
     # 9. Update state
     state["trades_today"] += 1
-    state["session_trades"][session] = session_count + 1
+    state["session_trades"][session] = gate_state["session_trades"] + 1
     state["last_signal"] = {
         "action":  data["action"],
         "price":   float(data["price"]),
         "session": session,
-        "ticker":  data["ticker"].upper().strip(),
+        "ticker":  ticker,
         "sl":      float(data["sl"])    if data.get("sl")    else None,
         "tp":      float(data["tp"])    if data.get("tp")    else None,
         "be":      float(data["be"])    if data.get("be")    else None,
-        "grade":   data.get("grade"),
+        "grade":   grade,
         "score":   int(data["score"])   if data.get("score") else None,
         "sweep":   data.get("sweep"),
+        "source":  "webhook",
     }
+    state["open_positions"][ticker] = dict(state["last_signal"], opened_at=now.isoformat())
 
     logger.info(
         f"Signal forwarded — session: {session} | "
@@ -396,13 +442,218 @@ def webhook():
     }), 200
 
 
+# ── Manual execution endpoint (Claude / MCP / voice) ─────────────────────────
+
+@app.route("/execute", methods=["POST"])
+def execute_manual():
+    """
+    Manual trade execution from Claude/MCP/voice.
+
+    Payload:
+      { "ticker": "NQ1!", "action": "buy"|"sell", "price": 21500.00,
+        "sl": 21475.00, "tp": 21550.00, "be": 21525.00,
+        "grade": "A+"|"A"|"B"|"C", "sweep": "PDL", "comment": "FVG_LONG_MANUAL",
+        "dry_run": true,    // defaults TRUE — must explicitly set false to fire live
+        "force":   false }   // set true to bypass grade filter (still subject to session/DD gates)
+
+    In dry_run mode: returns the payload that WOULD be forwarded + gate state,
+    makes NO TradersPost call, mutates NO state.
+    """
+    now = datetime.now(tz=EST)
+    logger.info(f"/execute called — {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
+    try:
+        data = request.get_json(force=True, silent=False)
+        if data is None:
+            raise ValueError("Empty body")
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Invalid JSON: {e}"}), 400
+
+    valid, validation_message = validate_payload(data)
+    if not valid:
+        return jsonify({"status": "error", "message": validation_message}), 400
+
+    # dry_run defaults TRUE — this is deliberate; must explicitly opt in to live
+    dry_run = bool(data.get("dry_run", True))
+    force   = bool(data.get("force", False))
+    grade   = data.get("grade")
+    ticker  = data.get("ticker", "").upper().strip()
+
+    reset_daily_state_if_new_day()
+
+    # Grade gate
+    grade_ok = (grade in EXECUTABLE_GRADES) or force
+    if not grade_ok:
+        return jsonify({
+            "status":  "rejected",
+            "message": f"Grade '{grade}' not in executable set {sorted(EXECUTABLE_GRADES)}. Pass force=true to override.",
+            "grade":   grade,
+        }), 200
+
+    # Risk gates
+    gates_ok, reason, gate_state = evaluate_gates(ticker, grade, now)
+    if not gates_ok:
+        return jsonify({
+            "status":  "rejected",
+            "message": reason,
+            "gates":   gate_state,
+        }), 200
+
+    session = gate_state["session"]
+    tp_payload = build_traderspost_payload(data, session)
+
+    # ── Dry run — return intent, don't fire ──
+    if dry_run:
+        logger.info(f"/execute DRY RUN — would forward {json.dumps(tp_payload)}")
+        return jsonify({
+            "status":        "dry_run",
+            "message":       "Dry run — no order sent. Pass dry_run=false to fire live.",
+            "would_forward": tp_payload,
+            "gates":         gate_state,
+            "grade":         grade,
+            "force":         force,
+        }), 200
+
+    # ── Live execution ──
+    success, tp_response = forward_to_traderspost(tp_payload)
+    if not success:
+        logger.error(f"/execute — TradersPost forward failed: {tp_response}")
+        return jsonify({"status": "error", "message": tp_response}), 502
+
+    # Mutate state
+    state["trades_today"] += 1
+    state["session_trades"][session] = gate_state["session_trades"] + 1
+    state["last_signal"] = {
+        "action":  data["action"],
+        "price":   float(data["price"]),
+        "session": session,
+        "ticker":  ticker,
+        "sl":      float(data["sl"])    if data.get("sl")    else None,
+        "tp":      float(data["tp"])    if data.get("tp")    else None,
+        "be":      float(data["be"])    if data.get("be")    else None,
+        "grade":   grade,
+        "score":   int(data["score"])   if data.get("score") else None,
+        "sweep":   data.get("sweep"),
+        "source":  "execute",
+    }
+    state["open_positions"][ticker] = dict(state["last_signal"], opened_at=now.isoformat())
+
+    log_path = log_trade_to_obsidian(data, session, now)
+
+    logger.info(
+        f"/execute LIVE — {ticker} {data['action']} @ {data['price']} | "
+        f"grade {grade} | session {session} | "
+        f"day {state['trades_today']}/{MAX_TRADES_PER_DAY}"
+    )
+
+    return jsonify({
+        "status":         "ok",
+        "dry_run":        False,
+        "forwarded":      True,
+        "session":        session,
+        "ticker":         ticker,
+        "action":         data["action"],
+        "grade":          grade,
+        "trades_today":   state["trades_today"],
+        "session_trades": state["session_trades"][session],
+        "trade_log":      log_path or "failed to write",
+    }), 200
+
+
+# ── Close position endpoint ───────────────────────────────────────────────────
+
+@app.route("/close", methods=["POST"])
+def close_position():
+    """
+    Close an open position for a given ticker.
+
+    Payload:
+      { "ticker": "NQ1!",
+        "dry_run": true,           // defaults TRUE
+        "comment": "manual close",
+        "outcome": "win"|"loss"|"be",  // optional — if provided, logs result + updates daily_loss
+        "exit_price": 21550.00 }       // optional — paired with outcome
+
+    Always permitted regardless of session/grade — close is the safety valve.
+    """
+    now = datetime.now(tz=EST)
+
+    try:
+        data = request.get_json(force=True, silent=False)
+        if data is None:
+            raise ValueError("Empty body")
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Invalid JSON: {e}"}), 400
+
+    ticker = str(data.get("ticker", "")).upper().strip()
+    if not ticker:
+        return jsonify({"status": "error", "message": "ticker is required"}), 400
+
+    dry_run  = bool(data.get("dry_run", True))
+    comment  = str(data.get("comment", "NOVA manual close"))
+    outcome  = str(data.get("outcome", "")).strip().lower()
+    exit_px  = data.get("exit_price")
+
+    position = state["open_positions"].get(ticker)
+    tp_payload = build_traderspost_close(ticker, comment)
+
+    if dry_run:
+        return jsonify({
+            "status":        "dry_run",
+            "message":       "Dry run — no close sent. Pass dry_run=false to fire live.",
+            "would_forward": tp_payload,
+            "open_position": position,
+        }), 200
+
+    success, tp_response = forward_to_traderspost(tp_payload)
+    if not success:
+        logger.error(f"/close — TradersPost forward failed: {tp_response}")
+        return jsonify({"status": "error", "message": tp_response}), 502
+
+    # Optional outcome logging
+    outcome_info = None
+    if outcome in ("win", "loss", "be"):
+        try:
+            exit_px_f = float(exit_px) if exit_px is not None else None
+        except (TypeError, ValueError):
+            exit_px_f = None
+
+        log_path = find_latest_open_trade_log()
+        if log_path and exit_px_f is not None:
+            update_trade_log_result(log_path, outcome, exit_px_f)
+
+        if outcome == "loss":
+            reset_daily_state_if_new_day()
+            state["daily_loss"] += RISK_PER_TRADE
+            logger.info(f"Daily loss updated via /close: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f}")
+
+        outcome_info = {"outcome": outcome, "exit_price": exit_px_f}
+
+    # Clear the tracked position
+    state["open_positions"].pop(ticker, None)
+
+    logger.info(f"/close LIVE — {ticker} closed | outcome={outcome or '—'}")
+
+    return jsonify({
+        "status":        "ok",
+        "dry_run":       False,
+        "forwarded":     True,
+        "ticker":        ticker,
+        "action":        "exit",
+        "outcome":       outcome_info,
+        "daily_loss":    state["daily_loss"],
+        "loss_limit":    MAX_DAILY_LOSS,
+    }), 200
+
+
 # ── Report result endpoint ────────────────────────────────────────────────────
 
 @app.route("/report-result", methods=["POST"])
 def report_result():
     """
-    Payload: { "outcome": "win" | "loss" | "be", "exit_price": 21550.00 }
+    Payload: { "outcome": "win" | "loss" | "be", "exit_price": 21550.00, "ticker": "NQ1!" }
     Finds the most recent open trade log and updates it with the result.
+    If ticker is passed, also clears the open_positions tracker for that ticker.
     """
     try:
         data = request.get_json(force=True, silent=False)
@@ -413,6 +664,7 @@ def report_result():
 
     outcome    = str(data.get("outcome", "")).strip().lower()
     exit_price = data.get("exit_price")
+    ticker     = str(data.get("ticker", "")).upper().strip()
 
     if outcome not in ("win", "loss", "be"):
         return jsonify({"status": "error", "message": "outcome must be 'win', 'loss', or 'be'"}), 400
@@ -435,6 +687,10 @@ def report_result():
         reset_daily_state_if_new_day()
         state["daily_loss"] += RISK_PER_TRADE
         logger.info(f"Daily loss updated: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f}")
+
+    # Clear tracked position if ticker supplied
+    if ticker:
+        state["open_positions"].pop(ticker, None)
 
     return jsonify({
         "status":     "ok",
@@ -467,6 +723,18 @@ def report_loss():
         "daily_loss":  state["daily_loss"],
         "limit":       MAX_DAILY_LOSS,
         "remaining":   max(0.0, MAX_DAILY_LOSS - state["daily_loss"]),
+    }), 200
+
+
+# ── Positions endpoint ────────────────────────────────────────────────────────
+
+@app.route("/positions", methods=["GET"])
+def positions():
+    """Return current open positions tracked in server state."""
+    return jsonify({
+        "status":          "ok",
+        "open_positions":  state["open_positions"],
+        "count":           len(state["open_positions"]),
     }), 200
 
 
@@ -514,15 +782,16 @@ def status():
     now     = datetime.now(tz=EST)
     session = get_current_session(now)
     return jsonify({
-        "time_est":       now.strftime("%Y-%m-%d %H:%M:%S"),
-        "active_session": session or "None",
-        "trades_today":   state["trades_today"],
-        "session_trades": state["session_trades"],
-        "daily_loss":     state["daily_loss"],
-        "loss_limit":     MAX_DAILY_LOSS,
-        "loss_remaining": max(0.0, MAX_DAILY_LOSS - state["daily_loss"]),
-        "last_signal":    state.get("last_signal"),
-        "equity":         build_equity_data(),
+        "time_est":        now.strftime("%Y-%m-%d %H:%M:%S"),
+        "active_session":  session or "None",
+        "trades_today":    state["trades_today"],
+        "session_trades":  state["session_trades"],
+        "daily_loss":      state["daily_loss"],
+        "loss_limit":      MAX_DAILY_LOSS,
+        "loss_remaining":  max(0.0, MAX_DAILY_LOSS - state["daily_loss"]),
+        "last_signal":     state.get("last_signal"),
+        "open_positions":  state["open_positions"],
+        "equity":          build_equity_data(),
     }), 200
 
 
