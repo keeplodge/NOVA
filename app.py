@@ -328,6 +328,14 @@ def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool,
     is_crypto  = ticker.upper() in CRYPTO_TICKERS
     is_weekend = now.weekday() >= 5
     session    = get_current_session(now)
+
+    # Weekend crypto exemption: weekday discipline stays tight, but on Sat/Sun
+    # crypto signals outside Asia/London/NY_AM get their own "Weekend_Crypto"
+    # lane so the Pine weekend crypto study can actually execute. All other
+    # gates (grade, 1/session, 3/day, $500 loss cap) still apply.
+    if is_weekend and is_crypto and session is None:
+        session = "Weekend_Crypto"
+
     session_count = state["session_trades"].get(session, 0) if session else 0
 
     gate_state = {
