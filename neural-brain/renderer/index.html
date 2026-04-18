@@ -1,0 +1,1668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NOVA Neural Brain</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;600&display=swap" rel="stylesheet">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+
+:root {
+  --cyan:    #00e5ff;
+  --green:   #00e676;
+  --orange:  #ff6b00;
+  --purple:  #e040fb;
+  --gold:    #c9a84c;
+  --bg:      #020408;
+  --panel:   rgba(6, 10, 18, 0.82);
+  --border:  rgba(255,255,255,0.055);
+  --text:    #d0d8e8;
+  --dim:     #4a5568;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Space Grotesk', 'JetBrains Mono', monospace;
+  overflow: hidden;
+  width: 100vw;
+  height: 100vh;
+  cursor: crosshair;
+  user-select: none;
+}
+
+/* Subtle scan-line overlay for HD CRT feel */
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.04) 2px,
+    rgba(0,0,0,0.04) 4px
+  );
+  pointer-events: none;
+  z-index: 999;
+}
+
+/* Ambient corner glow */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background:
+    radial-gradient(ellipse 60% 40% at 0% 0%,   rgba(0,229,255,0.035) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 40% at 100% 100%, rgba(224,64,251,0.025) 0%, transparent 70%),
+    radial-gradient(ellipse 40% 50% at 100% 0%,  rgba(0,230,118,0.02)  0%, transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+#canvas-container {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  z-index: 0;
+}
+
+canvas { display: block; }
+
+/* ── Titlebar ── */
+#titlebar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 36px;
+  background: rgba(2, 4, 8, 0.95);
+  border-bottom: 1px solid rgba(0,229,255,0.1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  z-index: 200;
+  -webkit-app-region: drag;
+  box-shadow: 0 1px 0 rgba(0,229,255,0.06), 0 4px 20px rgba(0,0,0,0.5);
+}
+#titlebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 5px;
+  color: var(--cyan);
+  text-shadow: 0 0 16px rgba(0,229,255,0.6);
+}
+#titlebar-logo .dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #00e676;
+  box-shadow: 0 0 8px rgba(0,230,118,0.8);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+#titlebar-logo .dot.thinking {
+  background: #ff9100;
+  box-shadow: 0 0 10px rgba(255,145,0,0.9);
+  animation: pulse-fast 0.4s ease-in-out infinite;
+}
+#win-controls {
+  display: flex;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+.win-btn {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.win-btn:hover { opacity: 0.7; }
+.win-btn.close  { background: #ff5f57; }
+.win-btn.min    { background: #febc2e; }
+.win-btn.max    { background: #28c840; }
+
+/* ── Glass panels ── */
+.glass-panel {
+  position: fixed;
+  background: var(--panel);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  z-index: 10;
+  box-shadow:
+    0 12px 40px rgba(0,0,0,0.7),
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    inset 0 0 0 1px rgba(255,255,255,0.02);
+}
+/* Cyan accent line on top of every panel */
+.glass-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 16px; right: 16px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0,229,255,0.35), transparent);
+  border-radius: 1px;
+}
+
+.panel-title {
+  color: var(--cyan);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 3.5px;
+  text-transform: uppercase;
+  margin-bottom: 14px;
+  text-shadow: 0 0 12px rgba(0,229,255,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.stat-label {
+  color: var(--dim);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+.stat-value {
+  color: #f0f4ff;
+  font-family: 'Space Grotesk', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Stats panel (top-left) ── */
+#stats-panel {
+  top: 48px; left: 16px;
+  width: 300px;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 7px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.025);
+}
+.stat-value.live { color: var(--green); }
+
+.live-indicator {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 9px; color: #00e676; letter-spacing: 1px;
+}
+.live-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #00e676;
+  box-shadow: 0 0 6px rgba(0,230,118,0.7);
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+.live-dot.orange { background: #ff9100; box-shadow: 0 0 8px rgba(255,145,0,0.8); animation: pulse-fast 0.5s ease-in-out infinite; }
+
+/* Neuromodulator bars */
+#neuro-bars {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.neuro-bar-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 5px;
+}
+.neuro-bar-label { width: 36px; font-size: 9px; color: #888; text-align: right; letter-spacing: 1px; }
+.neuro-bar-track {
+  flex: 1; height: 3px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 2px; overflow: hidden;
+}
+.neuro-bar-fill { height: 100%; border-radius: 2px; transition: width 0.4s ease; }
+.neuro-bar-fill.trading  { background: linear-gradient(90deg, #00e5ff, #0097a7); }
+.neuro-bar-fill.ideas    { background: linear-gradient(90deg, #39ff14, #00c853); }
+.neuro-bar-fill.nova     { background: linear-gradient(90deg, #ff6b00, #ff9100); }
+.neuro-bar-fill.personal { background: linear-gradient(90deg, #9b59b6, #ce93d8); }
+
+/* ── Categories panel (top-right) ── */
+#regions-panel {
+  top: 48px; right: 16px;
+  width: 260px;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+}
+.region-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 6px; padding: 5px 8px;
+  border-radius: 6px; cursor: pointer;
+  transition: background 0.2s;
+}
+.region-row:hover { background: rgba(255,255,255,0.04); }
+.region-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.region-name { flex: 1; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #bbb; }
+.region-bar-track { width: 50px; height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+.region-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
+.region-pct { font-size: 10px; color: #888; min-width: 24px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ── Response panel ── */
+#response-panel {
+  top: 50%; right: 16px;
+  transform: translateY(-50%);
+  width: 330px;
+  max-height: 44vh;
+  display: flex; flex-direction: column;
+  gap: 8px;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.4s;
+}
+#response-panel.visible { opacity: 1; pointer-events: auto; }
+#response-query {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px; color: #2a4060; letter-spacing: 2px;
+  text-transform: uppercase; padding: 0 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-left: 2px solid rgba(0,229,255,0.3);
+  padding-left: 8px;
+}
+#response-text {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 13px; line-height: 1.8; color: #b8c8e0;
+  font-weight: 400;
+  overflow-y: auto; max-height: 36vh;
+  padding: 4px 0;
+}
+#response-cursor {
+  display: inline-block; width: 2px; height: 14px;
+  background: var(--cyan); margin-left: 2px;
+  animation: blink 0.7s step-end infinite;
+  vertical-align: text-bottom;
+  opacity: 0;
+  box-shadow: 0 0 6px rgba(0,229,255,0.8);
+}
+#response-cursor.active { opacity: 1; }
+
+/* ── Status panel (bottom-left) ── */
+#status-panel {
+  bottom: 80px; left: 16px;
+  width: 220px;
+}
+#status-panel .panel-title { color: #e040fb; text-shadow: 0 0 10px rgba(224,64,251,0.4); }
+.live-dot.purple { background: #e040fb; box-shadow: 0 0 8px rgba(224,64,251,0.7); animation: pulse-dot 1.8s ease-in-out infinite; }
+
+/* ── Input panel ── */
+#input-panel {
+  bottom: 20px;
+  left: 50%; transform: translateX(-50%);
+  width: min(640px, calc(100vw - 40px));
+  display: flex; gap: 10px; align-items: center;
+  padding: 10px 16px;
+  border-color: rgba(0,229,255,0.12);
+}
+#text-input {
+  flex: 1;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(0,229,255,0.12);
+  border-radius: 8px;
+  padding: 11px 16px;
+  color: #e8f0ff;
+  font-family: 'Space Grotesk', inherit; font-size: 13px;
+  outline: none;
+  transition: border-color 0.25s, box-shadow 0.25s;
+  cursor: text;
+}
+#text-input:focus {
+  border-color: rgba(0,229,255,0.5);
+  box-shadow: 0 0 20px rgba(0,229,255,0.1), inset 0 0 0 1px rgba(0,229,255,0.06);
+}
+#text-input::placeholder { color: #2a3550; font-style: italic; font-size: 12px; }
+
+.ctrl-btn {
+  width: 38px; height: 38px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  color: #666; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s; flex-shrink: 0;
+  font-size: 15px; font-family: inherit;
+}
+.ctrl-btn:hover { background: rgba(255,255,255,0.08); color: #ccc; }
+.ctrl-btn.active {
+  background: rgba(0,229,255,0.12);
+  border-color: rgba(0,229,255,0.3);
+  color: #00e5ff;
+  box-shadow: 0 0 12px rgba(0,229,255,0.15);
+}
+.ctrl-btn.send {
+  background: rgba(0,229,255,0.08);
+  border-color: rgba(0,229,255,0.2);
+  color: #00e5ff;
+  font-size: 10px; letter-spacing: 2px; width: auto; padding: 0 14px;
+}
+.ctrl-btn.send:hover {
+  background: rgba(0,229,255,0.18);
+  box-shadow: 0 0 16px rgba(0,229,255,0.2);
+}
+
+/* ── Region info popup ── */
+#region-info {
+  bottom: 90px; left: 50%; transform: translateX(-50%);
+  width: 360px; display: none;
+}
+#region-info.visible { display: block; }
+.info-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px; }
+.info-body { font-size: 11px; line-height: 1.7; color: #999; }
+
+/* ── Memory modal ── */
+#memory-modal {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(8px);
+  z-index: 500;
+  align-items: center; justify-content: center;
+}
+#memory-modal.open { display: flex; }
+#memory-modal-inner {
+  background: rgba(8,12,20,0.95);
+  border: 1px solid rgba(0,229,255,0.2);
+  border-radius: 16px;
+  padding: 28px; width: 500px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.8), 0 0 40px rgba(0,229,255,0.05);
+}
+.modal-title { font-size: 11px; letter-spacing: 4px; color: #00e5ff; margin-bottom: 20px; text-transform: uppercase; text-shadow: 0 0 12px rgba(0,229,255,0.4); }
+#mem-content {
+  width: 100%;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px; padding: 12px;
+  color: #ddd; font-family: inherit; font-size: 12px;
+  resize: vertical; min-height: 80px; outline: none;
+  transition: border-color 0.2s;
+}
+#mem-content:focus { border-color: rgba(0,229,255,0.3); }
+.modal-label { font-size: 9px; color: #555; letter-spacing: 2px; text-transform: uppercase; margin: 14px 0 6px; }
+#mem-summary {
+  width: 100%;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 6px; padding: 8px 12px;
+  color: #aaa; font-family: inherit; font-size: 11px; outline: none;
+}
+.cat-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.cat-chip {
+  padding: 4px 12px; border-radius: 20px;
+  font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.04);
+  color: #888; cursor: pointer; transition: all 0.2s;
+}
+.cat-chip.selected { border-color: currentColor; opacity: 0.9; }
+.modal-actions { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+.modal-btn { padding: 8px 20px; border-radius: 8px; border: none; cursor: pointer; font-family: inherit; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; transition: all 0.2s; }
+.modal-btn.cancel { background: rgba(255,255,255,0.06); color: #888; }
+.modal-btn.cancel:hover { background: rgba(255,255,255,0.1); color: #ccc; }
+.modal-btn.save { background: rgba(0,229,255,0.15); color: #00e5ff; border: 1px solid rgba(0,229,255,0.3); }
+.modal-btn.save:hover { background: rgba(0,229,255,0.25); box-shadow: 0 0 16px rgba(0,229,255,0.2); }
+
+/* ── Graph view btn ── */
+#graph-view-btn {
+  position: fixed; bottom: 80px; right: 290px;
+  padding: 8px 16px; z-index: 10; cursor: pointer;
+  background: rgba(8,12,20,0.75); backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.06); border-radius: 8px;
+  transition: all 0.2s; font-size: 10px; letter-spacing: 2px;
+  color: #00e5ff; font-family: inherit;
+}
+#graph-view-btn:hover { background: rgba(0,229,255,0.08); border-color: rgba(0,229,255,0.2); }
+
+/* ── Insights badge + panel ── */
+#insights-badge {
+  position: fixed; top: 48px; left: 50%; transform: translateX(-50%);
+  padding: 7px 14px; z-index: 10; cursor: pointer;
+  background: rgba(8,12,20,0.8); backdrop-filter: blur(18px);
+  border: 1px solid rgba(255,145,0,0.25); border-radius: 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; letter-spacing: 2.5px; text-transform: uppercase;
+  color: #ff9100; transition: all 0.25s;
+  box-shadow: 0 0 12px rgba(255,145,0,0.08);
+  display: none;
+}
+#insights-badge.visible { display: inline-flex; align-items: center; gap: 8px; }
+#insights-badge:hover { background: rgba(255,145,0,0.12); box-shadow: 0 0 18px rgba(255,145,0,0.2); }
+#insights-badge .pulse-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #ff9100; box-shadow: 0 0 8px rgba(255,145,0,0.8);
+  animation: pulse-fast 1.2s ease-in-out infinite;
+}
+
+#insights-panel {
+  position: fixed;
+  top: 88px; left: 50%; transform: translateX(-50%);
+  width: min(560px, calc(100vw - 40px));
+  max-height: 60vh; overflow-y: auto;
+  padding: 18px; display: none; z-index: 50;
+}
+#insights-panel.open { display: block; }
+#insights-panel .panel-title { color: #ff9100; text-shadow: 0 0 12px rgba(255,145,0,0.4); }
+.insight-card {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,145,0,0.12);
+  border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 10px;
+  transition: opacity 0.3s, transform 0.3s;
+}
+.insight-card.dismissed { opacity: 0; transform: translateY(-8px); pointer-events: none; }
+.insight-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; gap: 10px;
+}
+.insight-cat-chip {
+  padding: 2px 9px; border-radius: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px; letter-spacing: 2px; text-transform: uppercase;
+  border: 1px solid currentColor;
+}
+.insight-conf {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px; letter-spacing: 1.5px; color: #888;
+}
+.insight-summary { font-size: 12px; color: #e8f0ff; margin-bottom: 6px; font-weight: 500; }
+.insight-content { font-size: 11px; color: #a8b8cf; line-height: 1.55; margin-bottom: 8px; }
+.insight-sources {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8.5px; color: #4a5568; letter-spacing: 1px;
+  margin-bottom: 10px;
+}
+.insight-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.insight-btn {
+  padding: 5px 14px; border-radius: 6px; border: none; cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+  transition: all 0.18s;
+}
+.insight-btn.approve {
+  background: rgba(0,230,118,0.12); color: #00e676;
+  border: 1px solid rgba(0,230,118,0.3);
+}
+.insight-btn.approve:hover { background: rgba(0,230,118,0.22); box-shadow: 0 0 10px rgba(0,230,118,0.2); }
+.insight-btn.reject {
+  background: rgba(255,23,68,0.1); color: #ff5370;
+  border: 1px solid rgba(255,23,68,0.25);
+}
+.insight-btn.reject:hover { background: rgba(255,23,68,0.18); }
+.insight-empty {
+  text-align: center; padding: 28px 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: #4a5568; letter-spacing: 3px; text-transform: uppercase;
+}
+
+/* ── Loading ── */
+#loading {
+  position: fixed; inset: 0;
+  background: #000;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  z-index: 1000;
+  transition: opacity 1.2s ease;
+}
+#loading.hidden { opacity: 0; pointer-events: none; }
+.loading-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 26px; font-weight: 600;
+  letter-spacing: 12px; text-transform: uppercase;
+  color: var(--cyan); margin-bottom: 2px;
+  text-shadow: 0 0 60px rgba(0,229,255,0.5), 0 0 120px rgba(0,229,255,0.2);
+}
+.loading-sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; letter-spacing: 6px; color: #1e3048; margin-bottom: 36px;
+  text-transform: uppercase;
+}
+.loading-bar {
+  width: 240px; height: 1px;
+  background: rgba(255,255,255,0.04); border-radius: 1px; overflow: hidden;
+  box-shadow: 0 0 8px rgba(0,229,255,0.2);
+}
+.loading-fill {
+  width: 0%; height: 100%;
+  background: linear-gradient(90deg, #00e5ff, #00e676, #00e5ff);
+  background-size: 200%;
+  animation: shimmer 2s linear infinite;
+  transition: width 0.4s ease;
+}
+.loading-status {
+  margin-top: 16px; font-family: 'JetBrains Mono', monospace;
+  font-size: 8px; color: #263850; letter-spacing: 2.5px; text-transform: uppercase;
+}
+@keyframes shimmer { 0%{background-position:200%} 100%{background-position:-200%} }
+
+/* ── 3D region labels ── */
+.region-label-3d {
+  font-family: 'JetBrains Mono', monospace;
+  pointer-events: auto; cursor: pointer;
+  padding: 4px 10px;
+  background: rgba(2,4,10,0.72);
+  backdrop-filter: blur(8px) saturate(180%);
+  border-radius: 5px; white-space: nowrap;
+  transition: opacity 0.3s, background 0.2s;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.6);
+}
+.region-label-3d:hover { background: rgba(4,8,18,0.9) !important; }
+.rl-name { font-size: 9px; font-weight: 600; letter-spacing: 2.5px; text-transform: uppercase; text-shadow: 0 0 14px currentColor; }
+.rl-stats { font-family: 'Space Grotesk', monospace; font-size: 8px; color: #5a6a80; letter-spacing: 0.5px; margin-top: 2px; }
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+
+/* ── Animations ── */
+@keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.75)} }
+@keyframes pulse-fast { 0%,100%{opacity:1;transform:scale(1.1)} 50%{opacity:0.6;transform:scale(0.85)} }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+</style>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="loading">
+  <div class="loading-title">NOVA</div>
+  <div class="loading-sub">NEURAL BRAIN</div>
+  <div class="loading-bar"><div class="loading-fill" id="loading-fill"></div></div>
+  <div class="loading-status" id="loading-status">INITIALIZING NEURAL SUBSTRATE...</div>
+</div>
+
+<!-- 3D Canvas -->
+<div id="canvas-container"></div>
+
+<!-- Titlebar -->
+<div id="titlebar">
+  <div id="titlebar-logo">
+    <div class="dot" id="status-dot"></div>
+    NOVA &nbsp;·&nbsp; NEURAL BRAIN
+  </div>
+  <div id="win-controls">
+    <button class="win-btn min"   onclick="window.electronAPI?.minimize()"></button>
+    <button class="win-btn max"   onclick="window.electronAPI?.maximize()"></button>
+    <button class="win-btn close" onclick="window.electronAPI?.close()"></button>
+  </div>
+</div>
+
+<!-- Stats panel top-left -->
+<div id="stats-panel" class="glass-panel">
+  <div class="panel-title">
+    NOVA NEURAL ACTIVITY
+    <div class="live-indicator">
+      <div class="live-dot" id="conn-dot"></div>
+      <span id="conn-text">ONLINE</span>
+    </div>
+  </div>
+  <div class="stat-row"><span class="stat-label">Memories</span><span class="stat-value" id="stat-memories">--</span></div>
+  <div class="stat-row"><span class="stat-label">Active</span><span class="stat-value live" id="stat-active">0</span></div>
+  <div class="stat-row"><span class="stat-label">Queries</span><span class="stat-value" id="stat-queries">0</span></div>
+  <div class="stat-row"><span class="stat-label">Model</span><span class="stat-value" id="stat-model">llama3</span></div>
+  <div id="neuro-bars">
+    <div class="neuro-bar-row"><span class="neuro-bar-label">TRADE</span><div class="neuro-bar-track"><div class="neuro-bar-fill trading" id="bar-trading" style="width:40%"></div></div></div>
+    <div class="neuro-bar-row"><span class="neuro-bar-label">IDEAS</span><div class="neuro-bar-track"><div class="neuro-bar-fill ideas"   id="bar-ideas"   style="width:30%"></div></div></div>
+    <div class="neuro-bar-row"><span class="neuro-bar-label">NOVA</span> <div class="neuro-bar-track"><div class="neuro-bar-fill nova"    id="bar-nova"    style="width:50%"></div></div></div>
+    <div class="neuro-bar-row"><span class="neuro-bar-label">SELF</span> <div class="neuro-bar-track"><div class="neuro-bar-fill personal" id="bar-personal" style="width:20%"></div></div></div>
+  </div>
+</div>
+
+<!-- Categories panel top-right -->
+<div id="regions-panel" class="glass-panel">
+  <div class="panel-title">MEMORY REGIONS</div>
+  <div id="region-list"></div>
+</div>
+
+<!-- Response panel right-center -->
+<div id="response-panel" class="glass-panel">
+  <div class="panel-title">
+    NEURAL RESPONSE
+    <div class="live-indicator" id="think-indicator" style="display:none">
+      <div class="live-dot orange"></div>THINKING
+    </div>
+  </div>
+  <div id="response-query"></div>
+  <div id="response-text"></div><span id="response-cursor"></span>
+</div>
+
+<!-- Status panel bottom-left -->
+<div id="status-panel" class="glass-panel">
+  <div class="panel-title">
+    NOVA BRIDGE
+    <div class="live-indicator" style="color:#e040fb">
+      <div class="live-dot purple"></div>
+      <span id="bridge-text">LINKED</span>
+    </div>
+  </div>
+  <div class="stat-row"><span class="stat-label">Ollama</span><span class="stat-value" id="stat-ollama" style="color:#666">CHECKING</span></div>
+  <div class="stat-row"><span class="stat-label">Last query</span><span class="stat-value" id="stat-last">—</span></div>
+  <div style="margin-top:10px;display:flex;gap:6px;">
+    <button class="ctrl-btn" style="width:auto;padding:0 10px;font-size:9px;letter-spacing:1px;" id="btn-save">SAVE</button>
+    <button class="ctrl-btn" style="width:auto;padding:0 10px;font-size:9px;letter-spacing:1px;" id="btn-clear">CLEAR</button>
+  </div>
+</div>
+
+<!-- Region info popup -->
+<div id="region-info" class="glass-panel">
+  <div class="info-title" id="info-title">—</div>
+  <div class="info-body" id="info-body">—</div>
+</div>
+
+<!-- Pending insights badge + review panel -->
+<div id="insights-badge" onclick="toggleInsightsPanel()">
+  <span class="pulse-dot"></span>
+  <span id="insights-count">0</span>
+  <span>insights pending</span>
+</div>
+<div id="insights-panel" class="glass-panel">
+  <div class="panel-title">
+    REFLECTOR OUTPUT — REVIEW &amp; APPROVE
+    <span style="cursor:pointer;color:#666;font-size:12px;" onclick="toggleInsightsPanel()">×</span>
+  </div>
+  <div id="insights-list"></div>
+</div>
+
+<!-- Graph view button -->
+<div id="graph-view-btn" onclick="toggleGraphView()">Graph view</div>
+
+<!-- Input bar bottom-center -->
+<div id="input-panel" class="glass-panel">
+  <button class="ctrl-btn" id="btn-mic" title="Voice input">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <rect x="9" y="2" width="6" height="11" rx="3"/>
+      <path d="M5 10v1a7 7 0 0014 0v-1M12 19v4M8 23h8"/>
+    </svg>
+  </button>
+  <input type="text" id="text-input" placeholder="Query the neural brain..." autocomplete="off" spellcheck="false">
+  <button class="ctrl-btn" id="btn-memory" title="Add memory (Ctrl+M)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
+    </svg>
+  </button>
+  <button class="ctrl-btn send" id="btn-send">SEND</button>
+</div>
+
+<!-- Memory modal -->
+<div id="memory-modal">
+  <div id="memory-modal-inner">
+    <div class="modal-title">Store Memory Node</div>
+    <textarea id="mem-content" placeholder="Memory content..."></textarea>
+    <div class="modal-label">Summary (optional)</div>
+    <input id="mem-summary" type="text" placeholder="One-line summary...">
+    <div class="modal-label">Category</div>
+    <div class="cat-chips" id="cat-chips"></div>
+    <div class="modal-actions">
+      <button class="modal-btn cancel" onclick="closeModal()">CANCEL</button>
+      <button class="modal-btn save"   onclick="saveMemory()">ENCODE</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+
+// ── Constants ────────────────────────────────────────────────
+
+const CAT_REGION = {
+  trading:   'prefrontal',
+  nova:      'motor_cortex',
+  general:   'sensory_cortex',
+  personal:  'association',
+  ideas:     'concept_layer',
+  keeplodge: 'hippocampus',
+};
+
+const REGION_LAYOUT = {
+  prefrontal:     { x: -0.6, y:  1.0, z:  0.0 },
+  motor_cortex:   { x:  0.5, y:  0.9, z:  0.2 },
+  sensory_cortex: { x:  1.0, y:  0.2, z:  0.4 },
+  feature_layer:  { x:  0.3, y: -0.3, z:  0.2 },
+  association:    { x: -0.1, y:  0.3, z:  0.0 },
+  concept_layer:  { x: -0.5, y:  0.6, z: -0.2 },
+  predictive:     { x: -0.9, y: -0.1, z: -0.2 },
+  hippocampus:    { x: -0.5, y: -0.4, z:  0.2 },
+  cerebellum:     { x:  0.1, y: -0.8, z: -0.2 },
+  brainstem:      { x:  0.0, y: -0.5, z:  0.0 },
+  reflex_arc:     { x:  0.5, y: -0.6, z:  0.3 },
+};
+
+const REGION_COLORS = {
+  prefrontal:     0x00FFFF,
+  hippocampus:    0xC9A84C,
+  association:    0x9B59B6,
+  concept_layer:  0x39FF14,
+  motor_cortex:   0xFF6B00,
+  sensory_cortex: 0x4A90D9,
+  feature_layer:  0x00ccff,
+  predictive:     0xff00ff,
+  cerebellum:     0x66ff66,
+  brainstem:      0xff8800,
+  reflex_arc:     0xff4444,
+};
+
+const CAT_COLORS = {
+  trading:   '#00FFFF',
+  keeplodge: '#C9A84C',
+  personal:  '#9B59B6',
+  ideas:     '#39FF14',
+  nova:      '#FF6B00',
+  general:   '#4A90D9',
+};
+
+const CONNECTIONS = [
+  ['sensory_cortex','feature_layer'],
+  ['feature_layer','association'],
+  ['association','concept_layer'],
+  ['concept_layer','prefrontal'],
+  ['prefrontal','motor_cortex'],
+  ['motor_cortex','cerebellum'],
+  ['brainstem','reflex_arc'],
+  ['brainstem','cerebellum'],
+  ['hippocampus','association'],
+  ['hippocampus','prefrontal'],
+  ['predictive','association'],
+  ['predictive','concept_layer'],
+  ['sensory_cortex','reflex_arc'],
+  ['association','hippocampus'],
+  ['prefrontal','predictive'],
+  ['feature_layer','concept_layer'],
+];
+
+const REGION_DESC = {
+  prefrontal:     'Trading — executive planning & strategy',
+  motor_cortex:   'Nova — action & output execution',
+  sensory_cortex: 'General — sensory input processing',
+  association:    'Personal — cross-domain integration',
+  concept_layer:  'Ideas — abstract concept formation',
+  hippocampus:    'KeepLodge — memory consolidation',
+  feature_layer:  'Feature extraction & pattern detection',
+  predictive:     'Predictive modeling & anticipation',
+  cerebellum:     'Timing, rhythm & coordination',
+  brainstem:      'Core autonomic regulation',
+  reflex_arc:     'Fast reflexive response pathways',
+};
+
+// ── Neuron texture ───────────────────────────────────────────
+
+function makeNeuronTex(size = 64) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const h = size / 2;
+  const g = ctx.createRadialGradient(h, h, 0, h, h, h);
+  g.addColorStop(0,    'rgba(255,255,255,1.0)');
+  g.addColorStop(0.15, 'rgba(255,255,255,0.8)');
+  g.addColorStop(0.4,  'rgba(255,255,255,0.3)');
+  g.addColorStop(0.7,  'rgba(255,255,255,0.05)');
+  g.addColorStop(1,    'rgba(255,255,255,0.0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const t = new THREE.CanvasTexture(c);
+  t.needsUpdate = true;
+  return t;
+}
+
+// ── NeuralDust ───────────────────────────────────────────────
+
+class NeuralDust {
+  constructor(scene, count = 2000) {
+    this.count = count;
+    const geo = new THREE.BufferGeometry();
+    const pos = new Float32Array(count * 3);
+    const col = new Float32Array(count * 3);
+    const vel = new Float32Array(count * 3);
+    const palette = [
+      new THREE.Color(0x00ffff), new THREE.Color(0x4488ff),
+      new THREE.Color(0x00ff88), new THREE.Color(0xff00ff),
+      new THREE.Color(0xffcc00), new THREE.Color(0xff6600),
+    ];
+    for (let i = 0; i < count; i++) {
+      const r  = 0.8 + Math.random() * 2.5;
+      const th = Math.random() * Math.PI * 2;
+      const ph = Math.acos(2 * Math.random() - 1);
+      pos[i*3]   = r * Math.sin(ph) * Math.cos(th);
+      pos[i*3+1] = r * Math.sin(ph) * Math.sin(th) * 0.7 + 0.1;
+      pos[i*3+2] = r * Math.cos(ph);
+      vel[i*3]   = (Math.random() - 0.5) * 0.008;
+      vel[i*3+1] = (Math.random() - 0.5) * 0.005;
+      vel[i*3+2] = (Math.random() - 0.5) * 0.008;
+      const c = palette[Math.floor(Math.random() * palette.length)];
+      col[i*3] = c.r; col[i*3+1] = c.g; col[i*3+2] = c.b;
+    }
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+    this._vel = vel;
+    const tc = document.createElement('canvas');
+    tc.width = tc.height = 32;
+    const tctx = tc.getContext('2d');
+    const tg = tctx.createRadialGradient(16,16,0,16,16,16);
+    tg.addColorStop(0,   'rgba(255,255,255,1)');
+    tg.addColorStop(0.3, 'rgba(255,255,255,0.5)');
+    tg.addColorStop(0.7, 'rgba(255,255,255,0.1)');
+    tg.addColorStop(1,   'rgba(255,255,255,0)');
+    tctx.fillStyle = tg;
+    tctx.fillRect(0, 0, 32, 32);
+    this.mesh = new THREE.Points(geo, new THREE.PointsMaterial({
+      size: 0.008, map: new THREE.CanvasTexture(tc),
+      transparent: true, opacity: 0.2,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false, sizeAttenuation: true, vertexColors: true,
+    }));
+    scene.add(this.mesh);
+  }
+  update(time, activity = 0.1) {
+    const p = this.mesh.geometry.attributes.position.array;
+    const v = this._vel;
+    const spd = 0.3 + activity * 2.5;
+    for (let i = 0; i < this.count; i++) {
+      const i3 = i * 3;
+      p[i3]   += v[i3]   * spd;
+      p[i3+1] += v[i3+1] * spd;
+      p[i3+2] += v[i3+2] * spd;
+      const ang = time * 0.05 + i * 0.003;
+      p[i3]   += Math.sin(ang) * 0.0003;
+      p[i3+2] += Math.cos(ang) * 0.0003;
+      const x = p[i3], y = p[i3+1], z = p[i3+2];
+      if (Math.sqrt(x*x + y*y + z*z) > 4.0) {
+        const r  = 0.3 + Math.random() * 0.8;
+        const th = Math.random() * Math.PI * 2;
+        const ph = Math.acos(2 * Math.random() - 1);
+        p[i3]   = r * Math.sin(ph) * Math.cos(th);
+        p[i3+1] = r * Math.sin(ph) * Math.sin(th) * 0.7 + 0.1;
+        p[i3+2] = r * Math.cos(ph);
+      }
+    }
+    this.mesh.geometry.attributes.position.needsUpdate = true;
+    this.mesh.material.opacity = 0.08 + activity * 0.3;
+    this.mesh.material.size    = 0.005 + activity * 0.008;
+  }
+}
+
+// ── Brain3D ──────────────────────────────────────────────────
+
+class Brain3D {
+  constructor(container) {
+    this.container = container;
+    this.time = 0;
+    this.regionMeshes    = {};
+    this.regionGlows     = {};
+    this.regionMemPoints = {};   // bright per-memory layer over the dust
+    this.regionActivity  = {};
+    this.memoryNodes     = {};
+    this.labels          = {};
+    this.graphView       = false;
+    this._connLines      = [];
+    this.signals         = [];
+    this.maxSignals      = 150;
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x020408);
+
+    this.camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.01, 100);
+    this.camera.position.set(0, 0.3, 3.5);
+
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.1;
+    container.appendChild(this.renderer.domElement);
+
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.32, 0.40);
+    this.composer.addPass(this.bloomPass);
+
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.enableDamping    = true;
+    this.controls.dampingFactor    = 0.05;
+    this.controls.rotateSpeed      = 0.5;
+    this.controls.autoRotate       = true;
+    this.controls.autoRotateSpeed  = 0.25;
+    this.controls.target.set(0, 0.1, 0);
+    this.controls.minDistance = 1.5;
+    this.controls.maxDistance = 12;
+
+    this.scene.add(new THREE.AmbientLight(0x111133, 0.3));
+    const cl = new THREE.PointLight(0x2244aa, 0.6, 8);
+    cl.position.set(0, 0.2, 0);
+    this.scene.add(cl);
+
+    this.labelContainer = document.createElement('div');
+    this.labelContainer.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;';
+    document.body.appendChild(this.labelContainer);
+
+    this.neuronTex = makeNeuronTex();
+    this._initSignalSystem();
+
+    window.addEventListener('resize', () => this._onResize());
+    this.raycaster = new THREE.Raycaster();
+    this.raycaster.params.Points = { threshold: 0.08 };
+    this.mouse = new THREE.Vector2();
+    container.addEventListener('click', e => this._onClick(e));
+  }
+
+  buildFromMemories(memories) {
+    for (const m of Object.values(this.regionMeshes))    this.scene.remove(m);
+    for (const g of Object.values(this.regionGlows))     this.scene.remove(g);
+    for (const p of Object.values(this.regionMemPoints)) this.scene.remove(p);
+    this.regionMeshes    = {}; this.regionGlows = {};
+    this.regionMemPoints = {};
+    this.memoryNodes     = {};
+    this.labelContainer.innerHTML = '';
+    this.labels = {};
+    this._basePositions = {};
+
+    const groups = {};
+    for (const mem of memories) {
+      const r = CAT_REGION[mem.category] || 'sensory_cortex';
+      if (!groups[r]) groups[r] = [];
+      groups[r].push(mem);
+    }
+    for (const r of Object.keys(REGION_LAYOUT)) {
+      if (!groups[r]) groups[r] = [];
+    }
+
+    for (const [regionName, mems] of Object.entries(groups)) {
+      const layout = REGION_LAYOUT[regionName];
+      if (!layout) continue;
+
+      const bgCount    = 180;
+      const totalCount = bgCount + mems.length;
+      const posArr     = new Float32Array(totalCount * 3);
+
+      for (let i = 0; i < bgCount; i++) {
+        const r  = Math.random() * 0.28;
+        const th = Math.random() * Math.PI * 2;
+        const ph = Math.acos(2 * Math.random() - 1);
+        posArr[i*3]   = layout.x + r * Math.sin(ph) * Math.cos(th);
+        posArr[i*3+1] = layout.y + r * Math.sin(ph) * Math.sin(th);
+        posArr[i*3+2] = layout.z + r * Math.cos(ph);
+      }
+      for (let i = 0; i < mems.length; i++) {
+        const r  = 0.08 + Math.random() * 0.18;
+        const th = Math.random() * Math.PI * 2;
+        const ph = Math.acos(2 * Math.random() - 1);
+        const idx = bgCount + i;
+        posArr[idx*3]   = layout.x + r * Math.sin(ph) * Math.cos(th);
+        posArr[idx*3+1] = layout.y + r * Math.sin(ph) * Math.sin(th);
+        posArr[idx*3+2] = layout.z + r * Math.cos(ph);
+        this.memoryNodes[mems[i].id] = { region: regionName, posIdx: idx };
+      }
+
+      const geo   = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+      this._basePositions[regionName] = new Float32Array(posArr);
+
+      const color = REGION_COLORS[regionName] || 0xffffff;
+      const mat   = new THREE.PointsMaterial({
+        color, size: 0.020, map: this.neuronTex,
+        transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+      });
+      const pts = new THREE.Points(geo, mat);
+      pts.userData = { regionName, memCount: mems.length };
+      this.scene.add(pts);
+      this.regionMeshes[regionName] = pts;
+
+      const glowGeo = geo.clone();
+      const glowMat = new THREE.PointsMaterial({
+        color, size: 0.052, map: this.neuronTex,
+        transparent: true, opacity: 0.14,
+        blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+      });
+      const glow = new THREE.Points(glowGeo, glowMat);
+      this.scene.add(glow);
+      this.regionGlows[regionName] = glow;
+
+      // Bright per-memory layer — one distinct dot per real memory, over the dust
+      if (mems.length > 0) {
+        const memPosArr = posArr.slice(bgCount * 3);
+        const memGeo = new THREE.BufferGeometry();
+        memGeo.setAttribute('position', new THREE.BufferAttribute(memPosArr, 3));
+        const memMat = new THREE.PointsMaterial({
+          color, size: 0.058, map: this.neuronTex,
+          transparent: true, opacity: 1.0,
+          blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+        });
+        const memPts = new THREE.Points(memGeo, memMat);
+        memPts.userData = { regionName, isMemLayer: true, memCount: mems.length };
+        this.scene.add(memPts);
+        this.regionMemPoints[regionName] = memPts;
+      }
+
+      this._createLabel(regionName, mems.length);
+      this.regionActivity[regionName] = 0;
+    }
+  }
+
+  _createLabel(regionName, count) {
+    const label = document.createElement('div');
+    label.className = 'region-label-3d';
+    const hex = '#' + (REGION_COLORS[regionName] || 0xffffff).toString(16).padStart(6, '0');
+    label.style.border = `1px solid ${hex}33`;
+    label.innerHTML = `
+      <div class="rl-name" style="color:${hex}">${regionName.replace(/_/g,' ').toUpperCase()}</div>
+      <div class="rl-stats">${count} mem${count !== 1 ? 's' : ''}</div>
+    `;
+    label.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('regionClick', { detail: { name: regionName, count } }));
+    });
+    this.labelContainer.appendChild(label);
+    this.labels[regionName] = label;
+  }
+
+  activateMemories(ids) {
+    const regions = new Set();
+    for (const id of ids) {
+      const node = this.memoryNodes[id];
+      if (node) regions.add(node.region);
+    }
+    for (const r of regions) {
+      this.regionActivity[r] = Math.min((this.regionActivity[r] || 0) + 0.7, 1.0);
+      for (const [a, b] of CONNECTIONS) {
+        if ((a === r || b === r) && Math.random() < 0.5) {
+          this._spawnSignal(a, b, REGION_COLORS[a] || 0xffffff);
+        }
+      }
+    }
+  }
+
+  setThinking(on) {
+    if (on) {
+      for (const r of Object.keys(REGION_LAYOUT)) {
+        this.regionActivity[r] = 0.15 + Math.random() * 0.25;
+      }
+    }
+  }
+
+  pulseActivity() {
+    for (const [a, b] of CONNECTIONS) {
+      if (Math.random() < 0.12) this._spawnSignal(a, b, REGION_COLORS[a] || 0xffffff);
+    }
+  }
+
+  // ── Signal system ─────────────────────────────────────────
+
+  _initSignalSystem() {
+    const geo = new THREE.BufferGeometry();
+    const pos = new Float32Array(this.maxSignals * 3);
+    const col = new Float32Array(this.maxSignals * 3);
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+    this.signalMesh = new THREE.Points(geo, new THREE.PointsMaterial({
+      size: 0.03, map: this.neuronTex,
+      transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true, vertexColors: true,
+    }));
+    this.scene.add(this.signalMesh);
+    for (let i = 0; i < this.maxSignals; i++) {
+      this.signals.push({
+        active: false,
+        from: new THREE.Vector3(), to: new THREE.Vector3(),
+        mid:  new THREE.Vector3(), pos: new THREE.Vector3(),
+        progress: 0, speed: 0, color: new THREE.Color(),
+      });
+    }
+  }
+
+  _spawnSignal(fromR, toR, color) {
+    const fl = REGION_LAYOUT[fromR], tl = REGION_LAYOUT[toR];
+    if (!fl || !tl) return;
+    for (const sig of this.signals) {
+      if (!sig.active) {
+        sig.active = true;
+        sig.from.set(fl.x, fl.y, fl.z);
+        sig.to.set(tl.x, tl.y, tl.z);
+        sig.mid.set(
+          (fl.x+tl.x)/2 + (Math.random()-0.5)*0.3,
+          (fl.y+tl.y)/2 + (Math.random()-0.5)*0.3,
+          (fl.z+tl.z)/2 + (Math.random()-0.5)*0.3
+        );
+        sig.pos.copy(sig.from);
+        sig.progress = 0;
+        sig.speed = 0.5 + Math.random() * 0.9;
+        sig.color.set(color);
+        return;
+      }
+    }
+  }
+
+  _updateSignals(dt) {
+    const posArr = this.signalMesh.geometry.attributes.position.array;
+    const colArr = this.signalMesh.geometry.attributes.color.array;
+    for (let i = 0; i < this.maxSignals; i++) {
+      const sig = this.signals[i];
+      if (!sig.active) { posArr[i*3+1] = -100; continue; }
+      sig.progress += dt * sig.speed;
+      if (sig.progress >= 1) { sig.active = false; posArr[i*3+1] = -100; continue; }
+      const t = sig.progress, t1 = 1 - t;
+      sig.pos.x = t1*t1*sig.from.x + 2*t1*t*sig.mid.x + t*t*sig.to.x;
+      sig.pos.y = t1*t1*sig.from.y + 2*t1*t*sig.mid.y + t*t*sig.to.y;
+      sig.pos.z = t1*t1*sig.from.z + 2*t1*t*sig.mid.z + t*t*sig.to.z;
+      posArr[i*3]   = sig.pos.x;
+      posArr[i*3+1] = sig.pos.y;
+      posArr[i*3+2] = sig.pos.z;
+      colArr[i*3]   = sig.color.r;
+      colArr[i*3+1] = sig.color.g;
+      colArr[i*3+2] = sig.color.b;
+    }
+    this.signalMesh.geometry.attributes.position.needsUpdate = true;
+    this.signalMesh.geometry.attributes.color.needsUpdate    = true;
+  }
+
+  // ── Animate ────────────────────────────────────────────────
+
+  animate(dt) {
+    this.time += dt;
+
+    for (const [name, mesh] of Object.entries(this.regionMeshes)) {
+      const activity = this.regionActivity[name] || 0;
+      const phase    = this.time * 0.8 + name.length * 0.5;
+      const pulse    = Math.sin(phase) * 0.1 + 0.9;
+
+      mesh.material.opacity = (0.35 + Math.min(activity * 8, 0.65)) * pulse;
+      mesh.material.size    = 0.012 + activity * 0.022;
+
+      const glow = this.regionGlows[name];
+      if (glow) {
+        glow.material.opacity = (0.04 + Math.min(activity * 2, 0.18)) * (Math.sin(phase+1)*0.1+0.9);
+        glow.material.size    = 0.035 + activity * 0.055;
+      }
+
+      if (activity > 0.01 && this._basePositions[name]) {
+        const p = mesh.geometry.attributes.position.array;
+        const b = this._basePositions[name];
+        const j = Math.min(activity * 0.15, 0.018);
+        const stride = Math.max(1, Math.floor(p.length / (300 * 3)));
+        for (let i = 0; i < p.length; i += stride * 3) {
+          p[i]   = b[i]   + (Math.random()-0.5)*j;
+          p[i+1] = b[i+1] + (Math.random()-0.5)*j;
+          p[i+2] = b[i+2] + (Math.random()-0.5)*j;
+        }
+        mesh.geometry.attributes.position.needsUpdate = true;
+      }
+
+      this.regionActivity[name] = Math.max(0, activity - dt * 0.4);
+    }
+
+    // Bright per-memory dots — pulse and scale with activity, stay visible over dust
+    for (const [name, memPts] of Object.entries(this.regionMemPoints)) {
+      const activity = this.regionActivity[name] || 0;
+      const phase    = this.time * 0.9 + name.length * 0.5;
+      const pulse    = Math.sin(phase) * 0.08 + 0.92;
+      memPts.material.opacity = Math.min(1.0, 0.85 + activity * 0.15) * pulse;
+      memPts.material.size    = 0.048 + activity * 0.028;
+    }
+
+    this._updateSignals(dt);
+    this._updateLabelPositions();
+    this.controls.update();
+    this.composer.render();
+  }
+
+  _updateLabelPositions() {
+    const W = window.innerWidth, H = window.innerHeight;
+    for (const [name, label] of Object.entries(this.labels)) {
+      const layout = REGION_LAYOUT[name];
+      if (!layout) continue;
+      const v = new THREE.Vector3(layout.x, layout.y, layout.z).project(this.camera);
+      if (v.z > 1) { label.style.display = 'none'; continue; }
+      label.style.display   = 'block';
+      label.style.position  = 'absolute';
+      label.style.left      = `${(v.x * 0.5 + 0.5) * W}px`;
+      label.style.top       = `${(-v.y * 0.5 + 0.5) * H}px`;
+      label.style.transform = 'translate(-50%, -100%) translateY(-10px)';
+      const dist = this.camera.position.distanceTo(new THREE.Vector3(layout.x, layout.y, layout.z));
+      label.style.opacity   = Math.max(0, Math.min(1, 1 - (dist - 2) / 6));
+    }
+  }
+
+  toggleGraphView(on) {
+    this._connLines.forEach(l => this.scene.remove(l));
+    this._connLines = [];
+    if (on) {
+      for (const [a, b] of CONNECTIONS) {
+        const la = REGION_LAYOUT[a], lb = REGION_LAYOUT[b];
+        if (!la || !lb) continue;
+        const geo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(la.x, la.y, la.z),
+          new THREE.Vector3(lb.x, lb.y, lb.z),
+        ]);
+        const mat = new THREE.LineBasicMaterial({ color: 0x1a3a55, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending });
+        const line = new THREE.Line(geo, mat);
+        this.scene.add(line);
+        this._connLines.push(line);
+      }
+    }
+  }
+
+  _onResize() {
+    const w = window.innerWidth, h = window.innerHeight;
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+    this.composer.setSize(w, h);
+  }
+
+  _onClick(e) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.mouse.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+    this.mouse.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+    const hits = this.raycaster.intersectObjects(Object.values(this.regionMeshes));
+    if (hits.length > 0) {
+      const { regionName, memCount } = hits[0].object.userData;
+      window.dispatchEvent(new CustomEvent('regionClick', { detail: { name: regionName, count: memCount } }));
+    }
+  }
+}
+
+// ── App state ─────────────────────────────────────────────────
+
+let brain3d, dust, ws;
+let memories     = {};
+let queryCount   = 0;
+let activeIds    = [];
+let selectedCat  = 'general';
+let graphOn      = false;
+let streamBuffer = '';
+
+// ── UI helpers ────────────────────────────────────────────────
+
+function setLoading(pct, msg) {
+  const f = document.getElementById('loading-fill');
+  const s = document.getElementById('loading-status');
+  if (f) f.style.width = `${pct}%`;
+  if (s) s.textContent = msg;
+}
+
+function buildRegionList(mems) {
+  const counts = {};
+  for (const m of mems) counts[m.category] = (counts[m.category] || 0) + 1;
+  const list = document.getElementById('region-list');
+  list.innerHTML = '';
+  for (const [cat, color] of Object.entries(CAT_COLORS)) {
+    const n = counts[cat] || 0;
+    const row = document.createElement('div');
+    row.className = 'region-row';
+    row.innerHTML = `
+      <span class="region-dot" style="background:${color};box-shadow:0 0 5px ${color}66"></span>
+      <span class="region-name" style="color:${color}">${cat.toUpperCase()}</span>
+      <div class="region-bar-track"><div class="region-bar-fill" style="background:${color};width:${Math.min(n*12,100)}%"></div></div>
+      <span class="region-pct">${n}</span>
+    `;
+    row.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('regionClick', {
+        detail: { name: CAT_REGION[cat] || 'sensory_cortex', count: n }
+      }));
+    });
+    list.appendChild(row);
+  }
+}
+
+function updateStats() {
+  const total = Object.keys(memories).length;
+  document.getElementById('stat-memories').textContent = total;
+  document.getElementById('stat-queries').textContent  = queryCount;
+  const cats = {};
+  for (const m of Object.values(memories)) cats[m.category] = (cats[m.category] || 0) + 1;
+  const max = Math.max(1, ...Object.values(cats));
+  document.getElementById('bar-trading').style.width  = `${((cats.trading||0)/max)*100}%`;
+  document.getElementById('bar-ideas').style.width    = `${((cats.ideas||0)/max)*100}%`;
+  document.getElementById('bar-nova').style.width     = `${((cats.nova||0)/max)*100}%`;
+  document.getElementById('bar-personal').style.width = `${((cats.personal||0)/max)*100}%`;
+}
+
+function setConnStatus(online) {
+  const dot  = document.getElementById('conn-dot');
+  const text = document.getElementById('conn-text');
+  if (online) {
+    dot.style.background  = '#00e676';
+    dot.style.boxShadow   = '0 0 6px rgba(0,230,118,0.7)';
+    text.textContent = 'ONLINE';
+    document.getElementById('stat-ollama').textContent = 'ONLINE';
+    document.getElementById('stat-ollama').style.color = '#00e676';
+  } else {
+    dot.style.background  = '#ff1744';
+    dot.style.boxShadow   = '0 0 6px rgba(255,23,68,0.7)';
+    text.textContent = 'OFFLINE';
+    document.getElementById('stat-ollama').textContent = 'OFFLINE';
+    document.getElementById('stat-ollama').style.color = '#ff1744';
+  }
+}
+
+function startThinking(query) {
+  streamBuffer = '';
+  const panel = document.getElementById('response-panel');
+  panel.classList.add('visible');
+  document.getElementById('response-query').textContent = query.toUpperCase();
+  document.getElementById('response-text').textContent  = '';
+  document.getElementById('response-cursor').classList.add('active');
+  document.getElementById('think-indicator').style.display = 'flex';
+  const sdot = document.getElementById('status-dot');
+  if (sdot) sdot.className = 'dot thinking';
+  if (brain3d) brain3d.setThinking(true);
+}
+
+function addToken(token) {
+  streamBuffer += token;
+  const el = document.getElementById('response-text');
+  el.textContent = streamBuffer;
+  el.scrollTop   = el.scrollHeight;
+  if (brain3d && Math.random() < 0.15) brain3d.pulseActivity();
+}
+
+function stopThinking() {
+  document.getElementById('response-cursor').classList.remove('active');
+  document.getElementById('think-indicator').style.display = 'none';
+  const sdot = document.getElementById('status-dot');
+  if (sdot) sdot.className = 'dot';
+  document.getElementById('stat-last').textContent = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+}
+
+// ── Memory modal ──────────────────────────────────────────────
+
+window.openModal = function() {
+  document.getElementById('memory-modal').classList.add('open');
+  buildCatChips();
+  setTimeout(() => document.getElementById('mem-content').focus(), 50);
+};
+window.closeModal = function() {
+  document.getElementById('memory-modal').classList.remove('open');
+};
+function buildCatChips() {
+  const c = document.getElementById('cat-chips');
+  c.innerHTML = '';
+  for (const [cat, color] of Object.entries(CAT_COLORS)) {
+    const chip = document.createElement('div');
+    chip.className = 'cat-chip' + (cat === selectedCat ? ' selected' : '');
+    chip.textContent = cat;
+    chip.style.color = color;
+    if (cat === selectedCat) chip.style.borderColor = color;
+    chip.addEventListener('click', () => { selectedCat = cat; buildCatChips(); });
+    c.appendChild(chip);
+  }
+}
+window.saveMemory = function() {
+  const content = document.getElementById('mem-content').value.trim();
+  if (!content || !ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ event: 'memory:add', data: {
+    content, category: selectedCat,
+    summary: document.getElementById('mem-summary').value.trim(),
+    tags: [],
+  }}));
+  document.getElementById('mem-content').value  = '';
+  document.getElementById('mem-summary').value  = '';
+  closeModal();
+};
+
+// ── Graph view ────────────────────────────────────────────────
+
+window.toggleGraphView = function() {
+  graphOn = !graphOn;
+  document.getElementById('graph-view-btn').textContent = graphOn ? 'Cloud view' : 'Graph view';
+  if (brain3d) brain3d.toggleGraphView(graphOn);
+};
+
+// ── Insights (reflector output) ───────────────────────────────
+
+async function fetchPendingInsights() {
+  try {
+    const r = await fetch('http://127.0.0.1:7337/insights/pending');
+    if (!r.ok) return [];
+    return await r.json();
+  } catch { return []; }
+}
+
+function updateInsightsBadge(count) {
+  const badge   = document.getElementById('insights-badge');
+  const countEl = document.getElementById('insights-count');
+  countEl.textContent = count;
+  if (count > 0) badge.classList.add('visible');
+  else {
+    badge.classList.remove('visible');
+    document.getElementById('insights-panel').classList.remove('open');
+  }
+}
+
+function renderInsightsList(insights) {
+  const list = document.getElementById('insights-list');
+  list.innerHTML = '';
+  if (!insights || insights.length === 0) {
+    list.innerHTML = '<div class="insight-empty">No pending insights</div>';
+    return;
+  }
+  for (const ins of insights) {
+    const color = CAT_COLORS[ins.category] || '#888';
+    const card = document.createElement('div');
+    card.className = 'insight-card';
+    card.dataset.id = ins.id;
+    const confPct = Math.round((ins.confidence || 0) * 100);
+    const sources = Array.isArray(ins.sources) ? ins.sources : [];
+    card.innerHTML = `
+      <div class="insight-head">
+        <span class="insight-cat-chip" style="color:${color}">${(ins.category || 'general').toUpperCase()}</span>
+        <span class="insight-conf">CONF ${confPct}%</span>
+      </div>
+      <div class="insight-summary">${escapeHtml(ins.summary || '—')}</div>
+      <div class="insight-content">${escapeHtml(ins.content || '')}</div>
+      <div class="insight-sources">SOURCES: ${sources.length ? sources.join(' · ') : '—'}</div>
+      <div class="insight-actions">
+        <button class="insight-btn reject"  data-id="${ins.id}">REJECT</button>
+        <button class="insight-btn approve" data-id="${ins.id}">APPROVE</button>
+      </div>
+    `;
+    list.appendChild(card);
+  }
+  list.querySelectorAll('.insight-btn.approve').forEach(b => {
+    b.addEventListener('click', () => actOnInsight(b.dataset.id, 'approve'));
+  });
+  list.querySelectorAll('.insight-btn.reject').forEach(b => {
+    b.addEventListener('click', () => actOnInsight(b.dataset.id, 'reject'));
+  });
+}
+
+async function actOnInsight(id, action) {
+  try {
+    const r = await fetch(`http://127.0.0.1:7337/insights/${id}/${action}`, { method: 'POST' });
+    if (!r.ok) return;
+    const card = document.querySelector(`.insight-card[data-id="${id}"]`);
+    if (card) card.classList.add('dismissed');
+    setTimeout(refreshInsights, 350);
+  } catch (e) { console.warn('insight action failed', e); }
+}
+
+async function refreshInsights() {
+  const insights = await fetchPendingInsights();
+  updateInsightsBadge(insights.length);
+  renderInsightsList(insights);
+}
+
+window.toggleInsightsPanel = function() {
+  const panel = document.getElementById('insights-panel');
+  const open  = panel.classList.toggle('open');
+  if (open) refreshInsights();
+};
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+// ── Region info ───────────────────────────────────────────────
+
+window.addEventListener('regionClick', e => {
+  const { name, count } = e.detail;
+  const hex = '#' + (REGION_COLORS[name] || 0xffffff).toString(16).padStart(6,'0');
+  const panel = document.getElementById('region-info');
+  document.getElementById('info-title').textContent = name.replace(/_/g,' ').toUpperCase();
+  document.getElementById('info-title').style.color = hex;
+  document.getElementById('info-body').innerHTML =
+    (REGION_DESC[name] || `Neural region: ${name}`) +
+    (count !== undefined ? `<br><br><strong style="color:#fff">${count} memories stored</strong>` : '');
+  panel.classList.add('visible');
+  clearTimeout(panel._t);
+  panel._t = setTimeout(() => panel.classList.remove('visible'), 5000);
+});
+
+// ── Voice ─────────────────────────────────────────────────────
+
+let recognition = null, recActive = false;
+function setupVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  recognition = new SR();
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.lang = 'en-US';
+  recognition.onresult = e => {
+    const txt = e.results[0][0].transcript;
+    document.getElementById('text-input').value = txt;
+    sendQuery(txt);
+  };
+  recognition.onend = () => {
+    recActive = false;
+    document.getElementById('btn-mic').classList.remove('active');
+  };
+}
+document.getElementById('btn-mic').addEventListener('click', () => {
+  if (!recognition) return;
+  if (recActive) { recognition.stop(); recActive = false; document.getElementById('btn-mic').classList.remove('active'); }
+  else           { recognition.start(); recActive = true; document.getElementById('btn-mic').classList.add('active'); }
+});
+
+// ── Send query ────────────────────────────────────────────────
+
+function sendQuery(text) {
+  if (!text.trim() || !ws || ws.readyState !== 1) return;
+  queryCount++;
+  ws.send(JSON.stringify({ event: 'query', data: { query: text } }));
+  startThinking(text);
+  document.getElementById('text-input').value = '';
+}
+
+document.getElementById('btn-send').addEventListener('click',   () => sendQuery(document.getElementById('text-input').value));
+document.getElementById('btn-memory').addEventListener('click', () => openModal());
+document.getElementById('btn-clear').addEventListener('click',  () => {
+  document.getElementById('response-panel').classList.remove('visible');
+  streamBuffer = '';
+});
+document.getElementById('btn-save').addEventListener('click', () => {
+  if (ws) ws.send(JSON.stringify({ event: 'ping' }));
+});
+document.getElementById('text-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { sendQuery(e.target.value); e.stopPropagation(); }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+  if (e.ctrlKey && e.key === 'm') { e.preventDefault(); openModal(); }
+});
+
+// ── Init ──────────────────────────────────────────────────────
+
+async function init() {
+  setLoading(10, 'CREATING 3D SCENE...');
+  const container = document.getElementById('canvas-container');
+  brain3d = new Brain3D(container);
+
+  setLoading(30, 'SPAWNING NEURAL DUST...');
+  dust = new NeuralDust(brain3d.scene, 2000);
+
+  setLoading(50, 'CONNECTING TO BRAIN SERVER...');
+  setupVoice();
+
+  await new Promise(resolve => {
+    function tryWS() {
+      ws = new WebSocket('ws://127.0.0.1:7337/ws');
+      ws.onopen  = () => { setConnStatus(true); setLoading(70, 'HANDSHAKE ESTABLISHED...'); resolve(); };
+      ws.onerror = () => { setLoading(60, 'RETRYING CONNECTION...'); setTimeout(tryWS, 1200); };
+      ws.onclose = () => { setConnStatus(false); setTimeout(tryWS, 3000); };
+      ws.onmessage = ({ data }) => {
+        let msg; try { msg = JSON.parse(data); } catch { return; }
+        const { event, data: d } = msg;
+
+        if (event === 'brain:init') {
+          setLoading(90, 'LOADING MEMORY GRAPH...');
+          const mems = d.memories || [];
+          for (const m of mems) memories[m.id] = m;
+          brain3d.buildFromMemories(mems);
+          buildRegionList(mems);
+          updateStats();
+          setLoading(100, 'BRAIN ONLINE');
+          setTimeout(() => document.getElementById('loading').classList.add('hidden'), 600);
+          refreshInsights();
+        }
+        else if (event === 'brain:activate') {
+          activeIds = d.ids || [];
+          if (brain3d) brain3d.activateMemories(activeIds);
+          document.getElementById('stat-active').textContent = activeIds.length;
+        }
+        else if (event === 'brain:token') {
+          addToken(d.token || '');
+        }
+        else if (event === 'brain:think_done') {
+          stopThinking();
+          activeIds = [];
+          document.getElementById('stat-active').textContent = 0;
+        }
+        else if (event === 'brain:memory_added') {
+          const m = d.memory;
+          if (m) {
+            memories[m.id] = m;
+            brain3d.buildFromMemories(Object.values(memories));
+            buildRegionList(Object.values(memories));
+            updateStats();
+          }
+        }
+        else if (event === 'brain:insights_updated') {
+          refreshInsights();
+        }
+        else if (event === 'pong') {
+          const b = document.getElementById('btn-save');
+          b.textContent = 'SYNCED';
+          b.classList.add('active');
+          setTimeout(() => { b.textContent = 'SAVE'; b.classList.remove('active'); }, 1500);
+        }
+      };
+    }
+    tryWS();
+  });
+
+  // Animation loop
+  let last = performance.now();
+  function loop() {
+    requestAnimationFrame(loop);
+    const now = performance.now();
+    const dt  = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    const activity = Object.values(brain3d.regionActivity).reduce((s, v) => s + v, 0) / 11;
+    dust.update(brain3d.time, activity);
+    brain3d.animate(dt);
+  }
+  loop();
+}
+
+init().catch(console.error);
+</script>
+</body>
+</html>
