@@ -38,6 +38,11 @@ EVAL_ACCOUNTS = {
     "lucid_50k": {"label": "Lucid 50K",  "current": 50000.00,  "target": 53000.00},
 }
 
+# Default account count a single signal fans out to via TradersPost. Used to
+# compute the real daily-loss impact of one losing signal across copy-traded
+# accounts. Caller can override per-call via the 'accounts' payload field.
+ACTIVE_ACCOUNTS = len(EVAL_ACCOUNTS)
+
 def build_equity_data() -> list[dict]:
     """Calculate progress and dollars remaining for each eval account."""
     result = []
@@ -602,6 +607,13 @@ def close_position():
     outcome  = str(data.get("outcome", "")).strip().lower()
     exit_px  = data.get("exit_price")
 
+    try:
+        accounts = int(data.get("accounts", ACTIVE_ACCOUNTS))
+        if accounts < 1:
+            raise ValueError("accounts must be >= 1")
+    except (TypeError, ValueError) as e:
+        return jsonify({"status": "error", "message": f"Invalid accounts: {e}"}), 400
+
     position = state["open_positions"].get(ticker)
     tp_payload = build_traderspost_close(ticker, comment)
 
@@ -630,12 +642,22 @@ def close_position():
         if log_path and exit_px_f is not None:
             update_trade_log_result(log_path, outcome, exit_px_f)
 
+        actual_loss = 0.0
         if outcome == "loss":
             reset_daily_state_if_new_day()
-            state["daily_loss"] += RISK_PER_TRADE
-            logger.info(f"Daily loss updated via /close: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f}")
+            actual_loss = RISK_PER_TRADE * accounts
+            state["daily_loss"] += actual_loss
+            logger.info(
+                f"Daily loss updated via /close: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f} "
+                f"(+${actual_loss:.2f} from {accounts} account(s))"
+            )
 
-        outcome_info = {"outcome": outcome, "exit_price": exit_px_f}
+        outcome_info = {
+            "outcome":     outcome,
+            "exit_price":  exit_px_f,
+            "accounts":    accounts,
+            "actual_loss": actual_loss,
+        }
 
     # Clear the tracked position
     state["open_positions"].pop(ticker, None)
@@ -674,6 +696,13 @@ def report_result():
     exit_price = data.get("exit_price")
     ticker     = str(data.get("ticker", "")).upper().strip()
 
+    try:
+        accounts = int(data.get("accounts", ACTIVE_ACCOUNTS))
+        if accounts < 1:
+            raise ValueError("accounts must be >= 1")
+    except (TypeError, ValueError) as e:
+        return jsonify({"status": "error", "message": f"Invalid accounts: {e}"}), 400
+
     if outcome not in ("win", "loss", "be"):
         return jsonify({"status": "error", "message": "outcome must be 'win', 'loss', or 'be'"}), 400
 
@@ -690,22 +719,33 @@ def report_result():
     if not success:
         return jsonify({"status": "error", "message": "Failed to update trade log"}), 500
 
-    # Update daily loss state if trade was a loss
+    # Update daily loss state if trade was a loss — multiplied by the number
+    # of copy-traded accounts the signal filled on (default: all 3).
+    actual_loss = 0.0
     if outcome == "loss":
         reset_daily_state_if_new_day()
-        state["daily_loss"] += RISK_PER_TRADE
-        logger.info(f"Daily loss updated: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f}")
+        actual_loss = RISK_PER_TRADE * accounts
+        state["daily_loss"] += actual_loss
+        logger.info(
+            f"Daily loss updated: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f} "
+            f"(+${actual_loss:.2f} from {accounts} account(s))"
+        )
 
     # Clear tracked position if ticker supplied
     if ticker:
         state["open_positions"].pop(ticker, None)
 
     return jsonify({
-        "status":     "ok",
-        "message":    "Trade log updated",
-        "outcome":    outcome,
-        "exit_price": exit_price,
-        "log_file":   os.path.basename(path),
+        "status":        "ok",
+        "message":       "Trade log updated",
+        "outcome":       outcome,
+        "exit_price":    exit_price,
+        "accounts":      accounts,
+        "actual_loss":   actual_loss,
+        "daily_loss":    state["daily_loss"],
+        "loss_limit":    MAX_DAILY_LOSS,
+        "loss_remaining": max(0.0, MAX_DAILY_LOSS - state["daily_loss"]),
+        "log_file":      os.path.basename(path),
     }), 200
 
 
