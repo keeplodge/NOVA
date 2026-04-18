@@ -26,10 +26,11 @@ import os
 
 DB_PATH      = Path(__file__).parent / "brain.db"
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-# Reflector model is configurable so Sir can drop to a lighter model when RAM
-# is tight. Default llama3 needs ~4.6 GiB; alternatives: llama3.2:3b (~2 GiB),
-# phi3:mini (~2.3 GiB), qwen2.5:3b (~2 GiB).
-OLLAMA_MODEL = os.environ.get("NOVA_REFLECTOR_MODEL", "llama3")
+# Reflector model is configurable. Default is llama3.2:3b (~2 GiB footprint)
+# because Sir's current system can't load llama3:8b under typical RAM load.
+# Override via env var NOVA_REFLECTOR_MODEL — e.g. "llama3" once RAM frees up,
+# or "phi3:mini" / "qwen2.5:3b" for other light options.
+OLLAMA_MODEL = os.environ.get("NOVA_REFLECTOR_MODEL", "llama3.2:3b")
 EST          = ZoneInfo("America/New_York")
 
 REFLECTION_HOUR        = 22     # 10pm EST
@@ -104,7 +105,7 @@ async def _recent_memories(hours: int = LOOKBACK_HOURS) -> list[dict]:
             FROM memories
             WHERE created_at >= ?
             ORDER BY created_at DESC
-            LIMIT 40
+            LIMIT 20
         """, (cutoff,))
         rows = await cur.fetchall()
     return [dict(r) for r in rows]
@@ -120,10 +121,10 @@ def _recent_trade_logs(hours: int = LOOKBACK_HOURS) -> list[str]:
             if f.stat().st_mtime < cutoff:
                 continue
             text = f.read_text(encoding="utf-8", errors="replace")
-            entries.append(f"--- {f.name} ---\n{text[:900]}")
+            entries.append(f"--- {f.name} ---\n{text[:500]}")
         except Exception:
             continue
-        if len(entries) >= 10:
+        if len(entries) >= 5:
             break
     return entries
 
@@ -139,13 +140,13 @@ def _format_memories(mems: list[dict]) -> str:
 
 # ── Ollama ─────────────────────────────────────────────────────────────────
 
-async def _call_ollama(prompt: str, timeout: float = 120.0) -> str:
+async def _call_ollama(prompt: str, timeout: float = 600.0) -> str:
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{OLLAMA_URL}/api/generate", json={
             "model":   OLLAMA_MODEL,
             "prompt":  prompt,
             "stream":  False,
-            "options": {"temperature": 0.6, "num_predict": 1024},
+            "options": {"temperature": 0.6, "num_predict": 512},
         })
         r.raise_for_status()
         return r.json().get("response", "")
@@ -318,10 +319,16 @@ async def run_reflection() -> dict:
         trades=("\n\n".join(trades) if trades else "(no trades logged in last 24h)"),
     )
 
+    print(f"[reflector] calling {OLLAMA_MODEL} with {len(mems)} memories, {len(trades)} trades")
     try:
         raw = await _call_ollama(prompt)
     except Exception as e:
-        return {"ok": False, "reason": f"ollama error: {e}", "count": 0}
+        return {
+            "ok": False,
+            "reason": f"ollama error: {type(e).__name__}: {e}",
+            "model": OLLAMA_MODEL,
+            "count": 0,
+        }
 
     insights = _extract_json_array(raw)
     if not insights:
