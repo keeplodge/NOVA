@@ -550,21 +550,20 @@ class HeartbeatAgent:
 
     def _probe_traderspost(self) -> tuple[bool, str]:
         """
-        Light probe — we send a NOP with an invalid action so TP quickly 400s.
-        Reaching any HTTP response at all is the health signal. Doesn't
-        count as a trade; TP treats malformed payloads as no-ops.
+        Reachability probe — HEAD request so TradersPost never sees a trade
+        payload, never emails Sir, never risks a bogus fill. A HEAD will
+        typically 405 (Method Not Allowed) since TP webhooks only accept
+        POST, but ANY HTTP response means the host is alive and routable.
+        That's all a heartbeat needs to tell us.
         """
         if not self.tp_url:
             return False, "TRADERSPOST_WEBHOOK_URL not set"
         try:
-            r = requests.post(
-                self.tp_url,
-                json={"_nova_heartbeat": True, "ticker": "NQ1!", "action": "heartbeat"},
-                timeout=6,
-            )
-            # Any 2xx/4xx means the host is alive. 5xx or connection error = sick.
+            r = requests.head(self.tp_url, timeout=6, allow_redirects=False)
+            # 200/204/301/302/405 all mean "TP host is alive". Only 5xx or
+            # connection errors indicate real trouble.
             if r.status_code < 500:
-                return True, f"TP responsive ({r.status_code})"
+                return True, f"TP reachable ({r.status_code})"
             return False, f"TP {r.status_code}"
         except requests.exceptions.Timeout:
             return False, "TP timeout"
@@ -574,14 +573,13 @@ class HeartbeatAgent:
             return False, f"TP unexpected: {e}"
 
     def _probe_discord(self) -> tuple[bool, str]:
+        """HEAD-probe the Discord webhook — no body means no message posted."""
         if not self.obs.discord_url:
             return False, "NOVA_DISCORD_WEBHOOK_URL not set"
         try:
-            # Discord returns 400 on an empty POST (valid auth, bad payload).
-            # That's actually our "alive" signal without spamming the channel.
-            r = requests.post(self.obs.discord_url, json={}, timeout=5)
-            if r.status_code in (200, 204, 400):
-                return True, f"Discord alive ({r.status_code})"
+            r = requests.head(self.obs.discord_url, timeout=5, allow_redirects=False)
+            if r.status_code < 500:
+                return True, f"Discord reachable ({r.status_code})"
             return False, f"Discord {r.status_code}"
         except Exception as e:
             return False, f"Discord error: {e}"
