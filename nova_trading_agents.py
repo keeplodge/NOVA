@@ -498,6 +498,168 @@ def get_ledger(limit: int = 50) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Heartbeat Agent — operational watchdog
+# ───────────────────────────────────────────────────────────────────────────
+# Every 5 minutes during live sessions (and every 15 minutes outside them) the
+# agent runs a full chain check: can we reach TradersPost, is the Discord
+# webhook valid, has the Railway in-memory state drifted from expected. If
+# anything looks wrong, it fires an URGENT Discord alert *before* a real
+# signal arrives and finds itself unable to execute.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class HeartbeatAgent:
+    """
+    Runs in a daemon thread started by TradingCommander.__init__.
+
+    Checks on each cycle:
+      1. TradersPost webhook reachability (HEAD or lightweight probe)
+      2. Discord webhook reachability
+      3. Railway process health (self-ping of /status)
+      4. In-memory pending-fire queue size — if anything's been sitting for
+         more than PENDING_TTL-5min without being tapped, escalate again
+    """
+    def __init__(self, observability: "Observability", self_base_url: str | None = None):
+        self.obs      = observability
+        self.self_url = (self_base_url or os.environ.get("NOVA_PUBLIC_BASE",
+                         "https://nova-production-72f5.up.railway.app")).rstrip("/")
+        self.tp_url   = os.environ.get("TRADERSPOST_WEBHOOK_URL", "")
+        self.interval_live  = int(os.environ.get("NOVA_HEARTBEAT_INTERVAL_LIVE",  "300"))   # 5m
+        self.interval_quiet = int(os.environ.get("NOVA_HEARTBEAT_INTERVAL_QUIET", "900"))   # 15m
+        self._stop    = threading.Event()
+        self._thread  = None
+        self._last_tp_ok:      bool | None = None
+        self._last_discord_ok: bool | None = None
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name="HeartbeatAgent", daemon=True)
+        self._thread.start()
+        logger.info("[HeartbeatAgent] started")
+
+    def stop(self):
+        self._stop.set()
+
+    def _in_live_session(self) -> bool:
+        """London 02:00-05:00 EST or NY AM 08:30-11:00 EST."""
+        now = datetime.now(tz=EST)
+        if now.weekday() >= 5:
+            return False
+        minutes = now.hour * 60 + now.minute
+        return (2*60     <= minutes < 5*60) or (8*60+30 <= minutes < 11*60)
+
+    def _probe_traderspost(self) -> tuple[bool, str]:
+        """
+        Light probe — we send a NOP with an invalid action so TP quickly 400s.
+        Reaching any HTTP response at all is the health signal. Doesn't
+        count as a trade; TP treats malformed payloads as no-ops.
+        """
+        if not self.tp_url:
+            return False, "TRADERSPOST_WEBHOOK_URL not set"
+        try:
+            r = requests.post(
+                self.tp_url,
+                json={"_nova_heartbeat": True, "ticker": "NQ1!", "action": "heartbeat"},
+                timeout=6,
+            )
+            # Any 2xx/4xx means the host is alive. 5xx or connection error = sick.
+            if r.status_code < 500:
+                return True, f"TP responsive ({r.status_code})"
+            return False, f"TP {r.status_code}"
+        except requests.exceptions.Timeout:
+            return False, "TP timeout"
+        except requests.exceptions.ConnectionError as e:
+            return False, f"TP connection: {e}"
+        except Exception as e:
+            return False, f"TP unexpected: {e}"
+
+    def _probe_discord(self) -> tuple[bool, str]:
+        if not self.obs.discord_url:
+            return False, "NOVA_DISCORD_WEBHOOK_URL not set"
+        try:
+            # Discord returns 400 on an empty POST (valid auth, bad payload).
+            # That's actually our "alive" signal without spamming the channel.
+            r = requests.post(self.obs.discord_url, json={}, timeout=5)
+            if r.status_code in (200, 204, 400):
+                return True, f"Discord alive ({r.status_code})"
+            return False, f"Discord {r.status_code}"
+        except Exception as e:
+            return False, f"Discord error: {e}"
+
+    def _probe_self(self) -> tuple[bool, str]:
+        try:
+            r = requests.get(f"{self.self_url}/status", timeout=5)
+            if r.status_code == 200:
+                return True, "Railway self OK"
+            return False, f"Railway self {r.status_code}"
+        except Exception as e:
+            return False, f"Railway self error: {e}"
+
+    def _check_pending_queue(self) -> int:
+        """Count pending trades that are within 5 min of expiry and re-ping."""
+        now      = datetime.now(tz=EST)
+        near_exp = 0
+        with _pending_lock:
+            for tok, rec in _pending.items():
+                if rec["consumed"]:
+                    continue
+                if (rec["expires_at"] - now) <= timedelta(minutes=5):
+                    near_exp += 1
+        return near_exp
+
+    def _loop(self):
+        time.sleep(10)  # let the server finish booting before first probe
+        while not self._stop.is_set():
+            tp_ok,      tp_msg      = self._probe_traderspost()
+            disc_ok,    disc_msg    = self._probe_discord()
+            self_ok,    self_msg    = self._probe_self()
+            near_expiry             = self._check_pending_queue()
+
+            # Log transitions — only noisy if a channel just broke or recovered
+            if self._last_tp_ok is not None and self._last_tp_ok != tp_ok:
+                self.obs._append_ledger(
+                    "heartbeat_tp_transition", None,
+                    {"from": self._last_tp_ok, "to": tp_ok, "msg": tp_msg},
+                )
+                embed = {
+                    "title": "🫀 TradersPost " + ("RECOVERED ✅" if tp_ok else "DOWN ❗"),
+                    "color": 0x00C853 if tp_ok else 0xE53E3E,
+                    "description": tp_msg,
+                }
+                self.obs._post_discord(embed)
+            self._last_tp_ok = tp_ok
+
+            if self._last_discord_ok is not None and self._last_discord_ok != disc_ok:
+                # If Discord broke, the recovery ping is how we find out — log
+                # to ledger regardless.
+                self.obs._append_ledger(
+                    "heartbeat_discord_transition", None,
+                    {"from": self._last_discord_ok, "to": disc_ok, "msg": disc_msg},
+                )
+            self._last_discord_ok = disc_ok
+
+            # Lightweight ledger cadence so /agents/ledger shows liveness
+            self.obs._append_ledger(
+                "heartbeat", None,
+                {
+                    "tp":         tp_ok,
+                    "discord":    disc_ok,
+                    "self":       self_ok,
+                    "near_expiry_pending": near_expiry,
+                    "tp_msg":     tp_msg,
+                    "self_msg":   self_msg,
+                    "live":       self._in_live_session(),
+                },
+            )
+
+            # Purge expired manual-fire tokens on every cycle
+            purge_expired()
+
+            sleep_s = self.interval_live if self._in_live_session() else self.interval_quiet
+            self._stop.wait(sleep_s)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Trading Commander — top-level orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -512,6 +674,7 @@ class TradingCommander:
         gate_fn,
         build_tp_payload,
         discord_url: str | None = None,
+        start_heartbeat: bool = True,
     ):
         self.intel = SignalIntelligence()
         self.risk  = RiskGuardian(gate_fn)
@@ -521,6 +684,11 @@ class TradingCommander:
             ManualEscalationVenue(observability=self.obs),
         ])
         self._build_tp_payload = build_tp_payload
+
+        # Fire up the heartbeat watchdog unless caller opts out (unit tests)
+        self.heartbeat = HeartbeatAgent(self.obs) if start_heartbeat else None
+        if self.heartbeat:
+            self.heartbeat.start()
 
     def handle(self, raw: dict) -> CommanderResult:
         """

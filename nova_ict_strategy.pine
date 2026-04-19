@@ -9,14 +9,21 @@ i_london = input.session("0200-0500", "London Session", group="Sessions")
 i_ny     = input.session("0830-1100", "NY AM Session",  group="Sessions")
 i_asia   = input.session("1900-0000", "Asian Range",    group="Sessions")
 i_tz     = "America/New_York"
-i_swing  = input.int(5,    "Swing Length",     minval=2, maxval=20, group="Structure")
-i_bpd    = input.int(288,  "PDH/L Bars",       minval=60, maxval=1440, group="Structure")
+i_swing  = input.int(5,   "Swing Length",               minval=2, maxval=20, group="Structure")
+i_bpd    = input.int(96,  "Prior-session bars (24hr)",  minval=48, maxval=1440, tooltip="96 = 24hr on 15m. Captures fresh liquidity pool from the prior session. Was 288 (3-day rolling) prior to 2026-04-18.", group="Structure")
 i_buf    = input.float(2.0, "SL Buffer (pts)", minval=0.5, step=0.5,  group="Structure")
 i_rr     = input.float(2.0, "Target R:R",      minval=1.0, step=0.5,  group="Structure")
 i_be     = input.float(1.0, "BE at (R)",       minval=0.5, step=0.25, group="Structure")
-i_sfvg   = input.bool(true, "Show FVGs",    group="Display")
-i_ssw    = input.bool(true, "Show Sweeps",  group="Display")
+i_sfvg   = input.bool(true, "Show FVGs",   group="Display")
+i_ssw    = input.bool(true, "Show Sweeps", group="Display")
 i_sgrd   = input.bool(true, "Show Grader", group="Display")
+
+// Webhook auth — set this in the indicator settings dialog (not in source).
+// Pine's confirm=true prompt forces Sir to enter it the first time the
+// strategy is added to a chart. Source stays clean; the value is stored in
+// TradingView's per-chart settings and injected into every alert payload
+// as "secret".
+i_secret = input.string("", "Webhook Secret", confirm=true, group="Webhook")
 
 // Sessions
 in_lon = not na(time(timeframe.period, i_london, i_tz))
@@ -29,7 +36,7 @@ lon_end  = not in_lon and in_lon[1]
 ny_end   = not in_ny and in_ny[1]
 ses_end  = (lon_end or ny_end) and strategy.position_size != 0
 
-// Previous day high/low
+// Previous day high/low (24-hr rolling window — fresh liquidity pool)
 var float pdh = na
 var float pdl = na
 if ta.change(time("D")) != 0
@@ -127,7 +134,9 @@ if bar_index - bfvg_bar > 10
 if bar_index - sfvg_bar > 10
     sfvg_active := false
 
-// Trade Grader
+// Trade Grader — fixed 2026-04-18: FVG check now reads the *active* flag
+// (so the armed-FVG still counts at entry bar), not the FVG-forming-bar flag
+// which is only true for a single bar.
 var table gt = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 50), border_width=1)
 var int    gs = 0
 var string gl = "C"
@@ -136,7 +145,7 @@ if long_sig or short_sig
     sc = 0
     sc := not na(sw_lo) or not na(sw_hi) ? sc + 2 : sc
     sc := bull_mss or bear_mss ? sc + 2 : sc
-    sc := bfok_cur or sfok_cur ? sc + 2 : sc
+    sc := bfvg_active or sfvg_active ? sc + 2 : sc
     sc := in_ses ? sc + 2 : sc
     gs := sc
     gl := sc >= 8 ? "A+" : sc >= 6 ? "A" : sc >= 4 ? "B" : "C"
@@ -154,7 +163,7 @@ if long_sig
     etp  := close + dist * i_rr
     ebe  := close + dist * i_be
     strategy.entry("Long", strategy.long)
-    alert('{"ticker":"' + syminfo.ticker + '","action":"buy","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"FVG_LONG"}', alert.freq_once_per_bar_close)
+    alert('{"ticker":"' + syminfo.ticker + '","action":"buy","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"FVG_LONG","secret":"' + i_secret + '"}', alert.freq_once_per_bar)
 
 if short_sig
     dist  = (sw_hi + i_buf) - close
@@ -162,7 +171,7 @@ if short_sig
     etp  := close - dist * i_rr
     ebe  := close - dist * i_be
     strategy.entry("Short", strategy.short)
-    alert('{"ticker":"' + syminfo.ticker + '","action":"sell","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"FVG_SHORT"}', alert.freq_once_per_bar_close)
+    alert('{"ticker":"' + syminfo.ticker + '","action":"sell","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"FVG_SHORT","secret":"' + i_secret + '"}', alert.freq_once_per_bar)
 
 if strategy.position_size > 0
     if close >= ebe
