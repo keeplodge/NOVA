@@ -1,0 +1,24 @@
+{
+  "name": "nova-assistant-desktop",
+  "version": "1.0.0",
+  "description": "NOVA Assistant — always-on desktop app (Electron shell wrapping the browser dashboard).",
+  "main": "main.js",
+  "author": "Sir",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "ai.nova.assistant",
+    "productName": "NOVA Assistant",
+    "files": ["main.js", "preload.js", "package.json"],
+    "directories": { "output": "dist" },
+    "win": { "target": "nsis", "icon": "icon.ico" }
+  }
+}

@@ -57,17 +57,7 @@ body::after {
   z-index: 999;
 }
 
-/* Ambient corner glow */
-body::before {
-  content: '';
-  position: fixed; inset: 0;
-  background:
-    radial-gradient(ellipse 60% 40% at 0% 0%,   rgba(0,229,255,0.06) 0%, transparent 70%),
-    radial-gradient(ellipse 50% 40% at 100% 100%, rgba(255,107,0,0.045) 0%, transparent 70%),
-    radial-gradient(ellipse 40% 50% at 100% 0%,  rgba(176,114,255,0.03) 0%, transparent 60%);
-  pointer-events: none;
-  z-index: 0;
-}
+/* Ambient corner glow removed — clean navy background lets the orb breathe */
 
 #canvas-container {
   position: fixed;
@@ -93,7 +83,36 @@ canvas { display: block; }
   padding: 0 24px;
   z-index: 20;
   box-shadow: 0 1px 0 rgba(0,229,255,0.05), 0 6px 30px rgba(0,0,0,0.6);
+  -webkit-app-region: drag;
 }
+#titlebar .brand,
+#titlebar .status-pill,
+#titlebar .win-controls,
+#titlebar button { -webkit-app-region: no-drag; }
+
+.win-controls {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+}
+body.is-desktop .win-controls { display: inline-flex; }
+.win-btn {
+  width: 28px; height: 24px;
+  border: 1px solid rgba(0,229,255,0.15);
+  background: rgba(255,255,255,0.03);
+  color: var(--text-dim);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.win-btn:hover { background: rgba(0,229,255,0.08); color: var(--pb-cyan); border-color: rgba(0,229,255,0.4); }
+.win-btn.close:hover { background: rgba(229,62,62,0.12); color: var(--pb-danger); border-color: rgba(229,62,62,0.5); }
 .brand {
   display: flex;
   align-items: center;
@@ -328,52 +347,109 @@ canvas { display: block; }
   margin-top: 2px;
 }
 
-/* ── Assistant center (waveform + log) ─────────────────────────────── */
+/* ── Assistant center (waveform + chat) ───────────────────────────── */
 #wave-container {
   position: relative;
-  margin-top: 4px;
-  margin-bottom: 10px;
-  height: 72px;
+  margin-top: 2px;
+  margin-bottom: 8px;
+  height: 56px;
 }
 #wave-canvas { width: 100%; height: 100%; }
 
-#log-container {
-  max-height: 84px;
+#chat-log-wrap {
+  max-height: 140px;
+  min-height: 80px;
   overflow-y: auto;
-  padding-top: 8px;
+  padding: 8px 4px 10px;
   border-top: 1px solid rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  margin-bottom: 10px;
 }
-#log-container::-webkit-scrollbar { width: 3px; }
-#log-container::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+#chat-log-wrap::-webkit-scrollbar { width: 3px; }
+#chat-log-wrap::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.10); border-radius: 2px; }
+#chat-log-wrap::-webkit-scrollbar-track { background: transparent; }
 
-#log-list {
+#chat-log {
   display: flex;
-  flex-direction: column-reverse;
-  gap: 3px;
+  flex-direction: column;
+  gap: 8px;
 }
-.log-row {
+.chat-row {
   display: flex;
   gap: 10px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-dim);
+  align-items: flex-start;
+  font-family: var(--font-body);
+  font-size: 13px;
   line-height: 1.5;
-  padding: 2px 0;
 }
-.log-time { color: var(--text-fade); flex-shrink: 0; }
-.log-kind {
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  font-weight: 600;
+.chat-kind {
   flex-shrink: 0;
-  min-width: 70px;
+  min-width: 44px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  font-weight: 600;
+  padding-top: 2px;
 }
-.log-kind.voice  { color: var(--pb-cyan); }
-.log-kind.trade  { color: var(--pb-success); }
-.log-kind.alert  { color: var(--pb-danger); }
-.log-kind.brief  { color: var(--pb-orange-light); }
-.log-kind.state  { color: var(--text-fade); }
-.log-msg   { color: var(--text); flex: 1; word-break: break-word; }
+.chat-kind.user   { color: var(--pb-orange-light); }
+.chat-kind.nova   { color: var(--pb-cyan); }
+.chat-kind.system { color: var(--text-fade); }
+.chat-kind.alert  { color: var(--pb-danger); }
+.chat-msg {
+  color: var(--text);
+  word-break: break-word;
+  flex: 1;
+}
+.chat-msg.user   { color: #f0f4ff; }
+.chat-msg.nova   { color: #d0e5f0; }
+.chat-msg.system { color: var(--text-dim); font-style: italic; font-size: 12px; }
+
+/* Chat input pill */
+#chat-form { margin: 0; }
+.chat-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(0,229,255,0.12);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.chat-pill:focus-within {
+  border-color: rgba(0,229,255,0.4);
+  box-shadow: 0 0 16px rgba(0,229,255,0.1);
+}
+.chat-prompt {
+  font-family: var(--font-mono);
+  color: var(--pb-orange);
+  font-weight: 600;
+  font-size: 14px;
+}
+#chat-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  outline: none;
+}
+#chat-input::placeholder { color: rgba(160,174,192,0.4); font-style: italic; }
+.chat-send {
+  background: var(--pb-orange);
+  border: none;
+  border-radius: 6px;
+  color: white;
+  width: 30px; height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.chat-send:hover { background: var(--pb-orange-dark); }
 
 /* ── Neural strip (bottom) ─────────────────────────────────────────── */
 #neural-strip {

@@ -42,6 +42,11 @@
     <span id="link-dot" class="pulse-dot"></span>
     <span id="link-label">BRAIN</span>
   </div>
+  <div class="win-controls" id="win-controls">
+    <button class="win-btn" id="win-min"  title="Minimize">–</button>
+    <button class="win-btn" id="win-max"  title="Maximize">□</button>
+    <button class="win-btn close" id="win-close" title="Hide to tray">×</button>
+  </div>
 </header>
 
 <!-- Left panel: market state -->
@@ -83,7 +88,7 @@
   </div>
 </section>
 
-<!-- Center bottom: waveform + command log -->
+<!-- Center bottom: waveform + chat + log -->
 <section class="panel panel-center glass-panel">
   <div class="panel-title">
     ASSISTANT
@@ -92,9 +97,23 @@
   <div id="wave-container">
     <canvas id="wave-canvas" width="800" height="90"></canvas>
   </div>
-  <div id="log-container">
-    <div id="log-list"></div>
+
+  <!-- Conversation log -->
+  <div id="chat-log-wrap">
+    <div id="chat-log"></div>
   </div>
+
+  <!-- Chat input -->
+  <form id="chat-form" autocomplete="off">
+    <div class="chat-pill">
+      <span class="chat-prompt">&gt;</span>
+      <input id="chat-input" type="text" placeholder="Talk to NOVA…" autocomplete="off" spellcheck="false" />
+      <button type="submit" class="chat-send" aria-label="Send">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+  </form>
 </section>
 
 <!-- Bottom strip -->

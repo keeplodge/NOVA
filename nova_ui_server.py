@@ -135,6 +135,85 @@ async def push(body: dict):
     return {"ok": True}
 
 
+@app.post("/chat")
+async def chat(body: dict):
+    """
+    Conversational endpoint. Browser POSTs {"text": "..."} and we route it
+    through nova_command_ai.classify_and_respond (Claude → Ollama → keyword
+    fallback). Returns {"reply": "...", "action": "...", "reasoning": "..."}.
+    Also broadcasts both sides of the exchange to all connected WS clients
+    so every open tab sees the same conversation.
+    """
+    text = (body or {}).get("text", "").strip()
+    if not text:
+        return JSONResponse({"ok": False, "reason": "empty text"}, status_code=400)
+
+    # Broadcast user message first so every tab echoes it
+    user_entry = {
+        "time": time.strftime("%H:%M:%S"),
+        "kind": "user",
+        "msg":  text,
+    }
+    _log.insert(0, user_entry)
+    if len(_log) > _max_log:
+        _log.pop()
+    await broadcast({"type": "log", "payload": user_entry})
+
+    # Route through the command AI (runs sync — push to thread so we don't
+    # block the event loop while Ollama thinks)
+    try:
+        from nova_command_ai import classify_and_respond, handle_remember, handle_recall
+    except Exception as e:
+        reply = f"Command AI unavailable: {e}"
+        action, reasoning = "CHAT", "import error"
+    else:
+        try:
+            cr = await asyncio.to_thread(classify_and_respond, text)
+            reply     = cr.spoken or "Done, Sir."
+            action    = cr.action
+            reasoning = cr.reasoning
+
+            # Side effects for REMEMBER / RECALL
+            if action == "REMEMBER" and cr.payload:
+                ok = handle_remember(cr.payload)
+                if not ok:
+                    reply += " (couldn't persist, though.)"
+            elif action == "RECALL" and cr.payload:
+                recalled = handle_recall(cr.payload, limit=3)
+                if recalled:
+                    reply = f"{reply}\n\n{recalled}"
+        except Exception as e:
+            reply, action, reasoning = f"Chat error: {e}", "CHAT", "exception"
+
+    # Broadcast the assistant reply
+    nova_entry = {
+        "time": time.strftime("%H:%M:%S"),
+        "kind": "nova",
+        "msg":  reply,
+    }
+    _log.insert(0, nova_entry)
+    if len(_log) > _max_log:
+        _log.pop()
+    await broadcast({"type": "log", "payload": nova_entry})
+
+    # Flash mode to 'speaking' briefly so the orb + wave respond visually
+    _state["mode"] = "speaking"
+    await broadcast({"type": "state", "payload": _state})
+    asyncio.get_event_loop().call_later(2.5, lambda: _reset_mode())
+
+    return {"ok": True, "reply": reply, "action": action, "reasoning": reasoning}
+
+
+def _reset_mode():
+    _state["mode"] = "idle"
+    try:
+        asyncio.get_event_loop().create_task(
+            broadcast({"type": "state", "payload": _state})
+        )
+    except Exception:
+        pass
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()

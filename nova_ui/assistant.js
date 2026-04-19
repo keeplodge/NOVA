@@ -20,6 +20,107 @@ const COL = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Liquid core shaders — port of the Neural Brain's inner core blob.
+// 3D simplex noise vertex displacement + Fresnel rim + cyan gradient.
+// ═══════════════════════════════════════════════════════════════════════════
+const LIQUID_VERT = `
+uniform float uTime;
+uniform float uActivity;
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying float vNoise;
+
+vec3 mod289(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x*34.0)+10.0)*x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+float snoise(vec3 v) {
+  const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+  const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+  vec3 i  = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min(g.xyz, l.zxy);
+  vec3 i2 = max(g.xyz, l.zxy);
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+  i = mod289(i);
+  vec4 p = permute(permute(permute(
+               i.z + vec4(0.0, i1.z, i2.z, 1.0))
+             + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+             + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+  float n_ = 0.142857142857;
+  vec3 ns = n_ * D.wyz - D.xzx;
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_);
+  vec4 x = x_ *ns.x + ns.yyyy;
+  vec4 y = y_ *ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+  vec4 b0 = vec4(x.xy, y.xy);
+  vec4 b1 = vec4(x.zw, y.zw);
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+  vec3 p0 = vec3(a0.xy, h.x);
+  vec3 p1 = vec3(a0.zw, h.y);
+  vec3 p2 = vec3(a1.xy, h.z);
+  vec3 p3 = vec3(a1.zw, h.w);
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+}
+
+void main() {
+  vec3 pos = position;
+  float n1 = snoise(pos * 2.2 + vec3(uTime * 0.45));
+  float n2 = snoise(pos * 4.5 + vec3(uTime * 0.6, uTime * 0.4, uTime * 0.3)) * 0.5;
+  float n3 = snoise(pos * 8.0 + vec3(uTime * 0.9)) * 0.25;
+  float displacement = (n1 + n2 + n3) * (0.09 + uActivity * 0.05);
+  pos += normal * displacement;
+  vNoise = n1;
+  vNormal = normalize(normalMatrix * normal);
+  vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+  vPosition = mvPos.xyz;
+  gl_Position = projectionMatrix * mvPos;
+}
+`;
+
+const LIQUID_FRAG = `
+uniform float uTime;
+uniform float uActivity;
+uniform vec3 uColorDeep;
+uniform vec3 uColorBright;
+uniform vec3 uColorRim;
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying float vNoise;
+
+void main() {
+  vec3 viewDir = normalize(-vPosition);
+  float fresnel = 1.0 - abs(dot(viewDir, vNormal));
+  fresnel = pow(fresnel, 2.2);
+  float l1 = max(0.0, dot(vNormal, normalize(vec3(0.5, 0.8, 0.6))));
+  float l2 = max(0.0, dot(vNormal, normalize(vec3(-0.4, 0.2, 0.7)))) * 0.6;
+  float lighting = l1 * 0.7 + l2 + 0.25;
+  vec3 color = mix(uColorDeep, uColorBright, lighting);
+  color *= 1.0 + vNoise * 0.2;
+  color = mix(color, uColorRim, fresnel * 0.85);
+  float pulse = sin(uTime * 1.5) * 0.12 + 0.9;
+  color *= pulse * (1.0 + uActivity * 0.3);
+  color += uColorRim * fresnel * 0.45;
+  gl_FragColor = vec4(color, 0.98);
+}
+`;
+
+// ═══════════════════════════════════════════════════════════════════════════
 // WireframeOrb — Fibonacci-distributed nodes + nearest-neighbor edges + chord
 // lines through the interior + bright inner core. Echoes the Brain's BrainCore.
 // ═══════════════════════════════════════════════════════════════════════════
@@ -136,22 +237,23 @@ class WireframeOrb {
     }));
     scene.add(this.nodes);
 
-    // Inner bright core
-    const coreGeo = new THREE.SphereGeometry(0.05, 24, 24);
-    const coreMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.95,
-      blending: THREE.AdditiveBlending, depthWrite: false,
+    // Liquid inner core — shader-driven cyan blob with noise displacement
+    // (matches the Neural Brain's inner core). No outer halo — clean.
+    const coreGeo = new THREE.IcosahedronGeometry(0.09, 5);
+    this.coreMat = new THREE.ShaderMaterial({
+      vertexShader:   LIQUID_VERT,
+      fragmentShader: LIQUID_FRAG,
+      uniforms: {
+        uTime:        { value: 0 },
+        uActivity:    { value: 0 },
+        uColorDeep:   { value: new THREE.Color(0x002a3a) },
+        uColorBright: { value: new THREE.Color(0x00e5ff) },
+        uColorRim:    { value: new THREE.Color(0xeaffff) },
+      },
+      transparent: true,
     });
-    this.core = new THREE.Mesh(coreGeo, coreMat);
+    this.core = new THREE.Mesh(coreGeo, this.coreMat);
     scene.add(this.core);
-
-    // Soft halo glow behind everything
-    const haloGeo = new THREE.SphereGeometry(RADIUS * 1.8, 48, 48);
-    this.halo = new THREE.Mesh(haloGeo, new THREE.MeshBasicMaterial({
-      color: 0x00c8ff, transparent: true, opacity: 0.05,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.BackSide,
-    }));
-    scene.add(this.halo);
   }
 
   setMode(mode) {
@@ -185,15 +287,12 @@ class WireframeOrb {
     const activityBoost = (this.mode === 'speaking' || this.mode === 'alert' || this.mode === 'trade') ? 0.02 : 0;
     this.nodes.material.size = 0.045 + activityBoost + Math.sin(this.time * 1.2) * 0.004;
 
-    // Core pulse + color
-    const pulse = 0.85 + Math.sin(this.time * 2.2) * 0.15;
-    this.core.material.opacity = pulse * 0.95;
-    this.core.scale.setScalar(1.0 + Math.sin(this.time * 2.4) * 0.12);
-    this.core.material.color.copy(this.color);
-
-    // Halo
-    this.halo.material.opacity = 0.05 + 0.05 * Math.sin(this.time * 0.8);
-    this.halo.scale.setScalar(1.0 + Math.sin(this.time * 0.6) * 0.08);
+    // Liquid core shader uniforms
+    this.coreMat.uniforms.uTime.value     = this.time;
+    this.coreMat.uniforms.uActivity.value =
+      (this.mode === 'speaking' || this.mode === 'alert' || this.mode === 'trade') ? 0.6 : 0.15;
+    this.core.rotation.y += dt * 0.15;
+    this.core.rotation.x += dt * 0.05;
 
     // Rotation
     const rotY = dt * 0.22;
@@ -291,6 +390,7 @@ class App {
     this.wave = new Waveform(document.getElementById('wave-canvas'));
     this._setLoading(75, 'CONNECTING TO ASSISTANT...');
     await this._connectWS();
+    this._wireChat();
     this._setLoading(95, 'RENDERING...');
     this._animate();
     setTimeout(() => {
@@ -323,7 +423,8 @@ class App {
 
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.7, 0.42, 0.35);
+    // Lighter bloom — no outer halo, just enough to lift the wireframe edges
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.45, 0.35, 0.50);
     this.composer.addPass(this.bloomPass);
 
     window.addEventListener('resize', () => {
@@ -421,20 +522,53 @@ class App {
 
   _pushLog(entry) {
     if (!entry || !entry.msg) return;
-    this.log.unshift({
-      time: entry.time || new Date().toISOString().slice(11, 19),
-      kind: entry.kind || 'state',
-      msg:  entry.msg,
+    const kind = entry.kind || 'system';
+    const time = entry.time || new Date().toISOString().slice(11, 19);
+    this._appendChat(kind, entry.msg, time);
+  }
+
+  _appendChat(kind, msg, time) {
+    const log = document.getElementById('chat-log');
+    if (!log) return;
+    const k = (kind || 'system').toLowerCase();
+    const row = document.createElement('div');
+    row.className = 'chat-row';
+    row.innerHTML = `
+      <span class="chat-kind ${_esc(k)}">${_esc(k)}</span>
+      <span class="chat-msg ${_esc(k)}">${_esc(msg)}</span>
+    `;
+    log.appendChild(row);
+    const wrap = document.getElementById('chat-log-wrap');
+    if (wrap) wrap.scrollTop = wrap.scrollHeight;
+    while (log.children.length > 120) log.removeChild(log.firstChild);
+  }
+
+  _wireChat() {
+    const form  = document.getElementById('chat-form');
+    const input = document.getElementById('chat-input');
+    if (!form || !input) return;
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = (input.value || '').trim();
+      if (!text) return;
+      input.value = '';
+      this._appendChat('user', text);
+      try {
+        const r = await fetch('/chat', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ text }),
+        });
+        if (!r.ok) {
+          this._appendChat('system', `chat error: ${r.status}`);
+          return;
+        }
+        const data = await r.json();
+        if (data.reply) this._appendChat('nova', data.reply);
+      } catch (err) {
+        this._appendChat('system', `chat error: ${err}`);
+      }
     });
-    if (this.log.length > 200) this.log.length = 200;
-    const list = document.getElementById('log-list');
-    list.innerHTML = this.log.slice(0, 60).map((l) => `
-      <div class="log-row">
-        <span class="log-time">${_esc(l.time)}</span>
-        <span class="log-kind ${_esc(l.kind)}">${_esc(l.kind)}</span>
-        <span class="log-msg">${_esc(l.msg)}</span>
-      </div>
-    `).join('');
   }
 
   _animate() {
@@ -474,6 +608,22 @@ function _esc(s) {
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;',
   }[c]));
 }
+
+// ─── Electron desktop integration ────────────────────────────────────────────
+// Enables drag on #titlebar + wires window-control buttons when running in
+// the Electron shell. No-op in a plain browser tab.
+(function wireDesktop() {
+  const d = window.novaDesktop;
+  if (!d || !d.isDesktop) return;
+  document.body.classList.add('is-desktop');
+  const on = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', fn);
+  };
+  on('win-min',   () => d.minimize());
+  on('win-max',   () => d.maximize());
+  on('win-close', () => d.close());
+})();
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 new App().init().catch(console.error);
