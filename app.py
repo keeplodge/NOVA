@@ -37,8 +37,17 @@ def _webhook_auth_ok(req) -> tuple[bool, str]:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL", "")
+MAX_TRADES_PER_DAY      = 3   # 1 London + 2 NY AM
+
+# Per-session caps — asymmetric. London is a confirmation window, NY AM is
+# where liquidity + displacement stack up so we allow a second shot if the
+# first closes or gets stopped mid-session.
+SESSION_TRADE_CAPS = {
+    "London": 1,
+    "NY_AM":  2,
+}
+# Fallback for any future session that isn't in the map
 MAX_TRADES_PER_SESSION  = 1
-MAX_TRADES_PER_DAY      = 2   # London + NY AM — one per session
 MAX_DAILY_LOSS          = 500.00   # USD
 RISK_PER_TRADE          = 500.00   # USD
 REWARD_PER_TRADE        = 1000.00  # USD
@@ -401,8 +410,10 @@ def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool,
         return False, f"Rejected — futures market closed on weekend ({norm})", gate_state
     if session is None:
         return False, f"Rejected — outside London/NY_AM sessions ({now.strftime('%H:%M %Z')})", gate_state
-    if session_count >= MAX_TRADES_PER_SESSION:
-        return False, f"Rejected — max {MAX_TRADES_PER_SESSION} trade(s) already in {session}", gate_state
+    session_cap = SESSION_TRADE_CAPS.get(session, MAX_TRADES_PER_SESSION)
+    gate_state["session_cap"] = session_cap
+    if session_count >= session_cap:
+        return False, f"Rejected — max {session_cap} trade(s) already in {session}", gate_state
     if state["trades_today"] >= MAX_TRADES_PER_DAY:
         return False, f"Rejected — daily trade limit of {MAX_TRADES_PER_DAY} reached", gate_state
     if state["daily_loss"] >= MAX_DAILY_LOSS:
