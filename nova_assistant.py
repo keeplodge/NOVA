@@ -16,6 +16,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import asyncio
+
+import edge_tts
 import numpy as np
 import pygame
 import requests
@@ -27,16 +30,59 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── KeepLodge Agent integrations ──────────────────────────────────────────────
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "keeplodge"))
+try:
+    from waitlist_agent import poll_and_process as _waitlist_poll
+    from waitlist_agent import morning_briefing_report as _waitlist_report
+    _WAITLIST_ENABLED = True
+except ImportError as _e:
+    _WAITLIST_ENABLED = False
+
+try:
+    from competitive_agent import morning_briefing_summary as _competitive_summary
+    _COMPETITIVE_ENABLED = True
+except ImportError:
+    _COMPETITIVE_ENABLED = False
+
 # ── Config ─────────────────────────────────────────────────────────────────────
-ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"          # Daniel — Steady Broadcaster (premade)
-FINNHUB_API_KEY     = os.environ.get("FINNHUB_KEY", "")
+EDGE_TTS_VOICE  = "en-GB-RyanNeural"   # British male — Microsoft neural (free)
+FINNHUB_API_KEY = os.environ.get("FINNHUB_KEY", "")
 NEWSAPI_KEY         = os.environ.get("NEWSAPI_KEY", "")
 NOVA_SERVER_URL     = os.environ.get(
     "NOVA_SERVER_URL", "https://nova-production-72f5.up.railway.app"
 )
 WAKE_PHRASE = "nova"
 EST         = ZoneInfo("America/New_York")
+
+# ── Neural Brain Bridge ───────────────────────────────────────────────────────
+import sys as _sys2
+_BRAIN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neural-brain", "backend")
+if _BRAIN_PATH not in _sys2.path:
+    _sys2.path.insert(0, _BRAIN_PATH)
+try:
+    from brain_bridge import (
+        sync_store as _brain_store,
+        sync_search as _brain_search,
+        classify as _brain_classify,
+        remember as _brain_remember,
+        remember_briefing as _brain_remember_briefing,
+        remember_debrief as _brain_remember_debrief,
+        remember_trade as _brain_remember_trade,
+        context_block as _brain_context_block,
+        sync_online as _brain_online,
+    )
+    _BRAIN_ENABLED = True
+except ImportError:
+    _BRAIN_ENABLED = False
+
+# ── Claude-powered voice command intelligence ────────────────────────────────
+try:
+    from nova_command_ai import classify_and_respond as _nova_classify, handle_remember as _nova_cmd_remember, handle_recall as _nova_cmd_recall
+    _COMMAND_AI_ENABLED = True
+except ImportError:
+    _COMMAND_AI_ENABLED = False
 
 NQ_TECH_NAMES = {
     "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META",
@@ -68,58 +114,40 @@ pygame.mixer.init()
 
 def speak(text: str):
     """
-    Convert text to speech via ElevenLabs and play it.
+    Convert text to speech via edge-tts (Microsoft neural, free, no API key).
     Thread-safe: acquires _speak_lock so concurrent calls queue instead of overlap.
-    Stops any active playback before loading the next clip.
-    Falls back to print if ELEVENLABS_API_KEY is missing.
     """
     logger.info(f"[NOVA]: {text}")
 
-    if not ELEVENLABS_API_KEY:
-        print(f"\n[NOVA]: {text}\n")
-        return
-
     with _speak_lock:
-        # Stop anything currently playing before we load the next clip
         if pygame.mixer.music.get_busy():
             pygame.mixer.music.stop()
 
         tmp_path = None
         try:
-            response = requests.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
-                headers={
-                    "xi-api-key": ELEVENLABS_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "model_id": "eleven_turbo_v2_5",
-                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-                },
-                timeout=20,
-            )
-            response.raise_for_status()
+            tmp_path = tempfile.mktemp(suffix=".mp3")
 
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-                f.write(response.content)
-                tmp_path = f.name
+            async def _synthesise():
+                communicate = edge_tts.Communicate(text, EDGE_TTS_VOICE)
+                await communicate.save(tmp_path)
+
+            asyncio.run(_synthesise())
 
             pygame.mixer.music.load(tmp_path)
             pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
                 time.sleep(0.1)
-            pygame.mixer.music.unload()  # release file handle before delete (Windows)
+            pygame.mixer.music.unload()
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"ElevenLabs request error: {e}")
-            print(f"\n[NOVA]: {text}\n")
         except Exception as e:
-            logger.error(f"TTS playback error: {e}")
+            logger.error(f"TTS error: {e}")
             print(f"\n[NOVA]: {text}\n")
         finally:
             if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
 
 # ── Voice Input ────────────────────────────────────────────────────────────────
@@ -615,6 +643,23 @@ def morning_briefing():
         "Stand by for your full pre-flight."
     )
 
+    # ── SECTION 0 — RECALL FROM NEURAL BRAIN ──────────────────────────────────
+    # NOVA now opens the day by surfacing the top insight from the last session.
+    if _BRAIN_ENABLED:
+        try:
+            yday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            hits = _brain_search(f"debrief {yday}", limit=2) or _brain_search(
+                "yesterday trade session loss setup", limit=2
+            )
+            if hits:
+                top = hits[0]
+                summary = top.get("summary") or (top.get("content") or "")[:180]
+                if summary:
+                    speak("Recalling yesterday.")
+                    speak(summary)
+        except Exception as _e:
+            logger.debug(f"brain recall skipped: {_e}")
+
     # ── SECTION 1 — TIME AND WEATHER ──────────────────────────────────────────
     speak("Section 1. Time and weather.")
 
@@ -739,8 +784,36 @@ def morning_briefing():
 
     # ── SECTION 5 — BUSINESS PULSE ────────────────────────────────────────────
     speak("Section 5. Business pulse.")
-    speak("KeepLodge waitlist — automated count not yet connected. Check dashboard manually.")
+
+    if _WAITLIST_ENABLED:
+        try:
+            report = _waitlist_report()
+            total, today_count = "unknown", "unknown"
+            for line in report.splitlines():
+                if "Total signups:" in line:
+                    total = line.split(":", 1)[1].strip()
+                elif "New today:" in line:
+                    today_count = line.split(":", 1)[1].strip()
+            speak(
+                f"KeepLodge waitlist. {total} total signups. "
+                f"{today_count} new since midnight."
+            )
+        except Exception as e:
+            logger.error(f"Waitlist report error: {e}")
+            speak("KeepLodge waitlist data unavailable.")
+    else:
+        speak("KeepLodge waitlist — automated count not yet connected. Check dashboard manually.")
+
     speak("New Discord members overnight — manual check required in server dashboard.")
+
+    if _COMPETITIVE_ENABLED:
+        try:
+            comp_summary = _competitive_summary()
+            if comp_summary:
+                speak(f"Competitive intel. {comp_summary}")
+        except Exception as e:
+            logger.error(f"Competitive intel error: {e}")
+
     speak("Urgent tasks from yesterday — check your Obsidian task list, Sir.")
 
     # ── SECTION 6 — NOVA READINESS ────────────────────────────────────────────
@@ -828,6 +901,45 @@ def morning_briefing():
         "Let's have a great session, Sir."
     )
 
+    # Store briefing summary to Neural Brain via the structured helper —
+    # auto-tags with `nova:briefing:<date>` heading so it's queryable later.
+    if _BRAIN_ENABLED:
+        try:
+            date_str = now.strftime('%Y-%m-%d')
+            nq_price = nq.get('price', 'N/A') if nq else 'N/A'
+            vix_level = vix.get('level', 'N/A') if vix else 'N/A'
+            vix_rating = vix.get('rating', 'unknown') if vix else 'unknown'
+            brief_content = (
+                f"Morning briefing {date_str}.\n"
+                f"Energy: {energy}/10. Mindset clearance: {clearance}.\n"
+                f"NQ: {nq_price}. VIX: {vix_level} ({vix_rating}).\n"
+                f"Mindset check-in: {q2_text[:140] if q2_text else 'no response'}.\n"
+                f"Priorities: {', '.join(priorities[:3]) if priorities else 'none set'}.\n"
+                f"Avoid today: {thing_to_avoid}.\n"
+                f"Discipline: {discipline_reminder}."
+            )
+            _brain_remember_briefing(
+                date_str,
+                brief_content,
+                summary=f"Morning brief {date_str} — energy {energy}/10, VIX {vix_rating}, clearance {clearance}",
+            )
+        except Exception as _e:
+            logger.debug(f"brain briefing store failed: {_e}")
+
+
+# ── Waitlist Poll Loop ─────────────────────────────────────────────────────────
+
+def waitlist_poll_loop():
+    """Background thread: poll all KeepLodge waitlist forms every 5 minutes."""
+    while True:
+        try:
+            new_count = _waitlist_poll()
+            for _ in range(new_count):
+                speak("Sir, a new host has joined the KeepLodge waitlist.")
+        except Exception as e:
+            logger.error(f"Waitlist poll error: {e}")
+        time.sleep(300)
+
 
 # ── Timed Alerts ───────────────────────────────────────────────────────────────
 
@@ -886,16 +998,122 @@ def eod_debrief():
     )
     speak("Rest well. Tomorrow we go again.")
 
+    # Store debrief to Neural Brain — becomes queryable for tomorrow's briefing
+    if _BRAIN_ENABLED:
+        try:
+            date_str = now.strftime('%Y-%m-%d')
+            trades    = nova.get('trades_today', 0)    if nova else 0
+            loss      = nova.get('daily_loss', 0.0)    if nova else 0.0
+            remaining = nova.get('loss_remaining', 500.0) if nova else 500.0
+            session_trades = nova.get('session_trades', {}) if nova else {}
+            body = (
+                f"EOD debrief {date_str}.\n"
+                f"Trades today: {trades}.\n"
+                f"Daily loss: ${loss:.0f}.\n"
+                f"Risk budget remaining: ${remaining:.0f}.\n"
+                f"Per-session: {session_trades}."
+            )
+            _brain_remember_debrief(
+                date_str,
+                body,
+                summary=f"EOD {date_str} — {trades} trades, ${loss:.0f} loss, ${remaining:.0f} remaining",
+            )
+        except Exception as _e:
+            logger.debug(f"brain debrief store failed: {_e}")
+
 
 # ── Wake Word Listener ─────────────────────────────────────────────────────────
 
+def _dispatch_command_action(response, utterance: str):
+    """
+    Execute the structured action returned by the Claude-powered classifier.
+    Called after NOVA has already spoken the `spoken` reply.
+    """
+    action = getattr(response, "action", "UNKNOWN")
+
+    if action == "STATUS":
+        try:
+            nova = get_nova_status()
+            if not nova:
+                speak("Status is offline, Sir.")
+                return
+            trades    = nova.get("trades_today", 0)
+            loss      = nova.get("daily_loss", 0.0)
+            remaining = nova.get("loss_remaining", 500.0)
+            session   = nova.get("active_session") or "none"
+            speak(
+                f"Session: {session}. {trades} trades today. "
+                f"Daily loss {loss:.0f}. Risk budget {remaining:.0f} remaining."
+            )
+        except Exception as e:
+            logger.error(f"STATUS dispatch failed: {e}")
+            speak("Couldn't pull status, Sir.")
+        return
+
+    if action == "MORNING_BRIEF":
+        threading.Thread(target=morning_briefing, daemon=True).start()
+        return
+
+    if action == "DEBRIEF":
+        threading.Thread(target=eod_debrief, daemon=True).start()
+        return
+
+    if action == "REMEMBER":
+        payload = (getattr(response, "payload", "") or utterance).strip()
+        if _COMMAND_AI_ENABLED and payload:
+            ok = _nova_cmd_remember(payload)
+            if not ok:
+                speak("Couldn't save that to the Brain, Sir.")
+        return
+
+    if action == "RECALL":
+        query = (getattr(response, "payload", "") or utterance).strip()
+        if _COMMAND_AI_ENABLED and query:
+            recap = _nova_cmd_recall(query, limit=3)
+            if recap:
+                speak(recap)
+        return
+
+    if action == "LEVELS":
+        # /levels skill is Claude-driven; no inline implementation yet.
+        speak("Pull up the chart. I'll narrate levels when the /levels skill is wired in, Sir.")
+        return
+
+    if action == "PATTERN":
+        speak("Running the pattern agent — this may take a moment.")
+        try:
+            import subprocess
+            subprocess.Popen(
+                ["python", os.path.join(os.path.dirname(os.path.abspath(__file__)), "nova_pattern_agent.py")],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logger.error(f"PATTERN dispatch failed: {e}")
+        return
+
+    if action == "REFLECT":
+        # Fire a one-off reflection via the Neural Brain backend
+        try:
+            import requests as _rq
+            _rq.post("http://127.0.0.1:7337/insights/run", timeout=5)
+            speak("Reflection running. Check the Brain for new insights shortly.")
+        except Exception:
+            speak("Brain is offline. Can't reflect without it, Sir.")
+        return
+
+    # CHAT / UNKNOWN — the spoken reply is all we need
+    return
+
+
 def listen_for_wake_word():
     """
-    Continuously listen for the wake phrase using sounddevice (no pyaudio needed).
-    Records 4-second windows and submits each to Google STT.
+    Continuously listen for the wake phrase, then route the follow-up command
+    through the Claude-powered classifier (nova_command_ai). Falls back to
+    keyword matching if Claude / Brain is unavailable, so voice never dies.
     """
     recognizer = sr.Recognizer()
     logger.info(f"Wake word listener active. Say: '{WAKE_PHRASE}'")
+    logger.info(f"Command AI: {'ON' if _COMMAND_AI_ENABLED else 'OFF (fallback keyword matcher)'}")
 
     while True:
         try:
@@ -903,9 +1121,39 @@ def listen_for_wake_word():
             text  = recognizer.recognize_google(audio).lower()
             logger.info(f"Heard: {text}")
 
-            if WAKE_PHRASE in text:
-                logger.info("Wake word detected")
-                speak("Sir. Ready. What do you need?")
+            if WAKE_PHRASE not in text:
+                continue
+
+            logger.info("Wake word detected")
+            speak("Sir.")
+
+            # Capture the command utterance
+            command = listen_response(timeout=8)
+            if not command:
+                speak("Didn't catch that, Sir.")
+                continue
+            logger.info(f"Command utterance: {command}")
+
+            # Classify via Claude + Brain context (or fallback)
+            if _COMMAND_AI_ENABLED:
+                response = _nova_classify(command)
+                logger.info(
+                    f"Action={response.action} | "
+                    f"Reasoning={response.reasoning}"
+                )
+                if response.spoken:
+                    speak(response.spoken)
+                _dispatch_command_action(response, command)
+            else:
+                # Pure fallback — no Claude, no Brain — bare keyword dispatch
+                cl = command.lower()
+                if "status" in cl:
+                    _dispatch_command_action(
+                        type("R", (), {"action":"STATUS","payload":"","spoken":"","reasoning":""})(),
+                        command,
+                    )
+                else:
+                    speak("Command AI is offline, Sir. Start it to use voice.")
 
         except sr.UnknownValueError:
             pass   # silence or unintelligible — keep looping
@@ -956,6 +1204,15 @@ def main():
         target=run_scheduler, daemon=True, name="nova-scheduler"
     )
     scheduler_thread.start()
+
+    if _WAITLIST_ENABLED:
+        waitlist_thread = threading.Thread(
+            target=waitlist_poll_loop, daemon=True, name="nova-waitlist"
+        )
+        waitlist_thread.start()
+        logger.info("Waitlist agent armed — polling every 5 minutes.")
+    else:
+        logger.warning("Waitlist agent not loaded — keeplodge/waitlist_agent.py not found.")
 
     listen_for_wake_word()
 
