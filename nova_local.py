@@ -19,7 +19,14 @@ import tkinter as tk
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import asyncio
+import re
+import subprocess
+import sys
+import webbrowser
+
 import anthropic
+import edge_tts
 import pygame
 import requests
 import schedule
@@ -36,9 +43,8 @@ from trading_agent import TradingAgent
 load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"   # Daniel — Steady Broadcaster (free tier)
-ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+EDGE_TTS_VOICE    = "en-GB-RyanNeural"   # British male — Microsoft neural (free)
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 WAKE_PHRASE         = "nova"
 NOVA_SERVER_URL     = os.environ.get(
     "NOVA_SERVER_URL", "https://nova-production-72f5.up.railway.app"
@@ -53,7 +59,7 @@ WHO SIR IS:
 - 3 prop firm eval accounts: Apex 50k, Apex 100k, Lucid 50k
 - Trades ICT concepts — liquidity sweeps, MSS, FVG, IFVG entries
 - Sessions: Asia 7pm-10pm, London 2am-5am, NY AM 8:30am-11am EST
-- Businesses: Jarvis Sweep (trading product on Whop), Hunnid Ticks (trading Discord), KeepLodge (SaaS STR platform)
+- Businesses: NOVA (trading product on Whop), Hunnid Ticks (trading Discord), KeepLodge (SaaS STR platform)
 - 142 free Discord members, growing paid community
 - Building KeepLodge to compete with Guesty and Hostaway
 
@@ -99,14 +105,20 @@ if not logger.handlers:
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 C_BG       = "#020408"
-C_CYAN     = "#00d4ff"   # listening
+C_CYAN     = "#00d4ff"   # listening / idle calm
 C_WHITE    = "#FFFFFF"   # speaking
-C_GREEN    = "#00ff88"   # trade detected
-C_RED      = "#ff3355"   # alert / warning
+C_GREEN    = "#00ff88"   # trade detected / session active / in profit
+C_RED      = "#ff3355"   # alert / loss warning
 C_TEXT     = "#4a6a7a"
 C_TITLE    = "#00d4ff"
 C_SUBTITLE = "#1a3a4a"
 C_BRACKET  = "#0a2030"   # HUD corner brackets (dim)
+
+# Adaptive tint palette — used by the market-state poller when assistant is idle
+C_AMBER       = "#ff9d00"   # high VIX / elevated volatility
+C_ORANGE_WARN = "#ff7a2e"   # approaching daily loss cap
+C_TEAL_CALM   = "#00a8b8"   # low VIX / calm market
+C_PURPLE_LIVE = "#b072ff"   # session is actively open
 
 # ── Thread-safe GUI state queue ────────────────────────────────────────────────
 _gui_queue  = queue.Queue()
@@ -118,21 +130,162 @@ def _push(mode: str, color: str, status: str = ""):
     _gui_queue.put({"mode": mode, "color": color, "status": status})
 
 
+def _push_color_only(color: str, status: str = ""):
+    """Update color and optionally status without changing mode. Used by the
+    market-state poller so an active 'listening' or 'speaking' mode keeps its
+    animation while the idle tint adapts to market conditions underneath."""
+    payload = {"color": color}
+    if status:
+        payload["status"] = status
+    _gui_queue.put(payload)
+
+
+# ── Market-state poller — makes the waveform biometric ─────────────────────────
+#
+# Every MARKET_POLL_INTERVAL seconds this thread samples:
+#   - VIX (yfinance ^VIX latest close)
+#   - NOVA /status (daily_loss, loss_remaining, active_session)
+# and pushes a color tint into the GUI queue based on priority rules:
+#
+#   1. daily_loss >= 300      → RED   (loss warning)
+#   2. loss_remaining <= 200  → ORANGE_WARN (near cap)
+#   3. active_session != None → PURPLE (session live)
+#   4. VIX >= 25              → AMBER (elevated volatility)
+#   5. VIX <= 13              → TEAL  (calm)
+#   6. otherwise              → CYAN  (default idle)
+
+MARKET_POLL_INTERVAL = 60   # seconds
+_MARKET_STATUS_URL   = os.environ.get("NOVA_SERVER_URL", "https://nova-production-72f5.up.railway.app") + "/status"
+
+
+def _fetch_vix_latest() -> float | None:
+    try:
+        import yfinance as yf
+        t = yf.Ticker("^VIX")
+        hist = t.history(period="1d", interval="5m")
+        if hist is None or hist.empty:
+            return None
+        return float(hist["Close"].iloc[-1])
+    except Exception:
+        return None
+
+
+def _fetch_nova_status() -> dict | None:
+    try:
+        r = requests.get(_MARKET_STATUS_URL, timeout=3)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        return None
+    return None
+
+
+def _pick_tint_from_state(vix: float | None, status: dict | None) -> tuple[str, str]:
+    """Returns (color, status_label) based on market + account state."""
+    if status:
+        loss      = status.get("daily_loss", 0.0) or 0.0
+        remaining = status.get("loss_remaining", 500.0) or 500.0
+        session   = status.get("active_session") or ""
+        if loss >= 300:
+            return C_RED, f"LOSS ${loss:.0f} / ${loss + remaining:.0f}"
+        if remaining <= 200:
+            return C_ORANGE_WARN, f"NEAR CAP — ${remaining:.0f} LEFT"
+        if session and session.lower() != "none":
+            return C_PURPLE_LIVE, f"{session.upper()} LIVE"
+    if vix is not None:
+        if vix >= 25:
+            return C_AMBER, f"VIX {vix:.1f} — ELEVATED"
+        if vix <= 13:
+            return C_TEAL_CALM, f"VIX {vix:.1f} — CALM"
+    return C_CYAN, ""
+
+
+def market_state_poller_loop():
+    """Background thread — polls market + account state every 60s."""
+    logger.info("Market state poller armed — tinting waveform from live data.")
+    while True:
+        try:
+            vix    = _fetch_vix_latest()
+            status = _fetch_nova_status()
+            color, label = _pick_tint_from_state(vix, status)
+            _push_color_only(color, label)
+        except Exception as e:
+            logger.debug(f"market state poll failed: {e}")
+        time.sleep(MARKET_POLL_INTERVAL)
+
+
+BRAIN_URL = "http://localhost:7474"
+
+def _brain_push(event_type: str, text: str = "", **extra):
+    """Fire-and-forget: post a live event to the NOVA Brain dashboard."""
+    def _post():
+        try:
+            requests.post(
+                f"{BRAIN_URL}/api/event",
+                json={"event_type": event_type, "text": text[:300], **extra},
+                timeout=0.8,
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_post, daemon=True).start()
+
+
+def _brain_push_sync(event_type: str, text: str = "", **extra):
+    """Synchronous brain push — used inside streaming where timing matters."""
+    try:
+        requests.post(
+            f"{BRAIN_URL}/api/event",
+            json={"event_type": event_type, "text": text, **extra},
+            timeout=0.5,
+        )
+    except Exception:
+        pass
+
+
+def _start_brain_server():
+    """Launch nova_brain.py then open the dashboard as a native desktop window."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    brain_path = os.path.join(here, "nova_brain.py")
+    webview_path = os.path.join(here, "nova_webview.py")
+    if not os.path.exists(brain_path):
+        logger.warning("nova_brain.py not found — brain dashboard not started.")
+        return
+    flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+    subprocess.Popen(
+        [sys.executable, brain_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
+    logger.info("NOVA Brain dashboard launching — http://localhost:7474")
+
+    def _open_desktop_window():
+        time.sleep(2)
+        if os.path.exists(webview_path):
+            subprocess.Popen(
+                [sys.executable, webview_path, "--url", BRAIN_URL],
+                creationflags=flags,
+            )
+        else:
+            # Fallback to browser if webview script missing
+            webbrowser.open(BRAIN_URL)
+
+    threading.Thread(target=_open_desktop_window, daemon=True).start()
+
+
 # ── GUI-aware speak() ──────────────────────────────────────────────────────────
 
-def speak(text: str):
+def speak(text: str, _to_brain: bool = True):
     """
-    ElevenLabs TTS with waveform state updates.
+    edge-tts TTS with waveform state updates.
+    Microsoft neural voice — free, no API key required.
     Patched onto nova_assistant so every briefing/alert call routes here.
+    Pass _to_brain=False when called from _stream_ask_nova to avoid double-push.
     """
     logger.info(f"[NOVA]: {text}")
     _push("speaking", C_WHITE, (text[:72] + "...") if len(text) > 72 else text)
-
-    if not ELEVENLABS_API_KEY:
-        print(f"\n[NOVA]: {text}\n")
-        time.sleep(0.4)
-        _push("listening", C_CYAN, "Listening...")
-        return
+    if _to_brain:
+        _brain_push("voice", text)
 
     with _speak_lock:
         if pygame.mixer.music.get_busy():
@@ -140,24 +293,13 @@ def speak(text: str):
 
         tmp_path = None
         try:
-            r = requests.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
-                headers={
-                    "xi-api-key": ELEVENLABS_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "model_id": "eleven_turbo_v2_5",
-                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-                },
-                timeout=20,
-            )
-            r.raise_for_status()
+            tmp_path = tempfile.mktemp(suffix=".mp3")
 
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-                f.write(r.content)
-                tmp_path = f.name
+            async def _synthesise():
+                communicate = edge_tts.Communicate(text, EDGE_TTS_VOICE)
+                await communicate.save(tmp_path)
+
+            asyncio.run(_synthesise())
 
             pygame.mixer.music.load(tmp_path)
             pygame.mixer.music.play()
@@ -165,11 +307,8 @@ def speak(text: str):
                 time.sleep(0.1)
             pygame.mixer.music.unload()
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"ElevenLabs error: {e}")
-            print(f"\n[NOVA]: {text}\n")
         except Exception as e:
-            logger.error(f"TTS playback error: {e}")
+            logger.error(f"TTS error: {e}")
             print(f"\n[NOVA]: {text}\n")
         finally:
             if tmp_path and os.path.exists(tmp_path):
@@ -307,27 +446,94 @@ def _build_live_context() -> str:
     return "\n".join(lines)
 
 
-def _ask_nova(user_message: str) -> str:
+_SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
+
+def _split_sentences(buf: str) -> tuple[list[str], str]:
+    """Split complete sentences out of a text buffer, return (sentences, remainder)."""
+    parts = _SENTENCE_END.split(buf)
+    if len(parts) <= 1:
+        return [], buf
+    complete = [s.strip() for s in parts[:-1] if s.strip()]
+    return complete, parts[-1]
+
+
+def _stream_ask_nova(user_message: str):
     """
-    Send a message to Claude with NOVA's system prompt and live data context.
-    Returns the response text, or a fallback string on error.
+    Stream Claude's response token-by-token to the brain dashboard while
+    speaking sentence-by-sentence via TTS. No second API key — uses the same
+    ANTHROPIC_API_KEY already in .env.
+
+    Flow:
+      1. brain_activate  → neural canvas lights up, holo ring activates
+      2. stream_start    → brain shows streaming bubble
+      3. stream_token ×N → tokens appear live in brain dashboard
+      4. stream_end      → brain finalises, TTS finishes last sentence
     """
     if not ANTHROPIC_API_KEY:
-        return "Anthropic API key not configured, Sir."
+        speak("Anthropic API key not configured, Sir.")
+        return
+
+    # ── Signal brain to activate ───────────────────────────────────────────────
+    _brain_push_sync("brain_activate", query=user_message, knowledge_accessed=[])
+    _brain_push_sync("stream_start")
+
+    client_local = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    context = _build_live_context()
+    full_message = f"Live data context:\n{context}\n\nSir's request: {user_message}"
+
+    full_response = ""
+    sentence_buf = ""
+    tts_q: queue.Queue = queue.Queue()
+
+    # ── TTS worker — speaks sentences in order without blocking the stream ─────
+    def _tts_worker():
+        while True:
+            sentence = tts_q.get()
+            if sentence is None:
+                break
+            speak(sentence, _to_brain=False)
+            tts_q.task_done()
+
+    tts_thread = threading.Thread(target=_tts_worker, daemon=True)
+    tts_thread.start()
+
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        context = _build_live_context()
-        full_message = f"Live data context:\n{context}\n\nSir's request: {user_message}"
-        response = client.messages.create(
+        with client_local.messages.stream(
             model="claude-opus-4-6",
-            max_tokens=300,
+            max_tokens=350,
             system=NOVA_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": full_message}],
-        )
-        return response.content[0].text.strip()
+        ) as stream:
+            for token in stream.text_stream:
+                full_response += token
+                sentence_buf  += token
+
+                # Push token to brain — dashboard sees it instantly
+                _brain_push_sync("stream_token", token=token)
+
+                # Queue complete sentences for TTS as they form
+                sentences, sentence_buf = _split_sentences(sentence_buf)
+                for s in sentences:
+                    tts_q.put(s)
+
     except Exception as e:
-        logger.error(f"Claude API error: {e}")
-        return "I ran into an issue reaching my reasoning engine, Sir."
+        logger.error(f"Stream error: {e}")
+        full_response = "I ran into an issue with my reasoning engine, Sir."
+        tts_q.put(full_response)
+
+    # Speak any remaining fragment
+    remainder = sentence_buf.strip()
+    if remainder:
+        tts_q.put(remainder)
+
+    # ── Signal brain stream is complete ───────────────────────────────────────
+    _brain_push_sync("stream_end", full_response=full_response)
+
+    # Wait for all TTS to finish before returning
+    tts_q.put(None)
+    tts_thread.join(timeout=120)
+
+    _push("listening", C_CYAN, "Listening...")
 
 
 def _handle_command(cmd: str):
@@ -337,6 +543,7 @@ def _handle_command(cmd: str):
     """
     cmd = cmd.strip().lower()
     logger.info(f"[cmd] \"{cmd}\"")
+    _brain_push("command", f"SIR: {cmd}")
 
     # ── stop ──────────────────────────────────────────────────────────────────
     if "stop" in cmd:
@@ -419,10 +626,9 @@ def _handle_command(cmd: str):
         speak(intro + body)
         return
 
-    # ── fallback — route through Claude with NOVA persona + live data ─────────
+    # ── fallback — stream through Claude, live to brain dashboard + TTS ─────────
     _push("speaking", C_WHITE, "Thinking...")
-    response = _ask_nova(cmd)
-    speak(response)
+    _stream_ask_nova(cmd)
 
 
 def run_wake_word():
@@ -770,6 +976,8 @@ class NOVAApp:
 # ── Entry Point ────────────────────────────────────────────────────────────────
 
 def main():
+    _start_brain_server()
+
     root = tk.Tk()
     app  = NOVAApp(root)   # noqa: F841
 
@@ -779,15 +987,24 @@ def main():
             f"NOVA local interface online. Good morning Sir. "
             f"Say '{WAKE_PHRASE}' to activate me at any time."
         )
+        _brain_push("system", "NOVA local interface online. Voice and trading agents armed.")
 
     # ── Trading agent — trade detection, session watch, loss alerts ──────────
     agent = TradingAgent(speak_fn=speak, push_gui_fn=_push, server_url=NOVA_SERVER_URL)
     agent.start()
 
+    # ── Drift monitor — background win-rate / streak / drawdown watcher ──────
+    try:
+        from nova_drift_monitor import DriftMonitor
+        DriftMonitor(speaker=speak).start()
+    except Exception as _e:
+        logger.warning(f"Drift monitor not started: {_e}")
+
     for name, fn in [
-        ("startup",   _startup),
-        ("wake-word", run_wake_word),
-        ("scheduler", run_scheduler),
+        ("startup",       _startup),
+        ("wake-word",     run_wake_word),
+        ("scheduler",     run_scheduler),
+        ("market-state",  market_state_poller_loop),
     ]:
         threading.Thread(target=fn, daemon=True, name=name).start()
 

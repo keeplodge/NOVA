@@ -1214,6 +1214,14 @@ def main():
     else:
         logger.warning("Waitlist agent not loaded — keeplodge/waitlist_agent.py not found.")
 
+    # Strategy drift monitor — background thread watching win-rate / streaks / drawdown
+    try:
+        from nova_drift_monitor import DriftMonitor
+        DriftMonitor(speaker=speak).start()
+        logger.info("Drift monitor armed — checking every 60 minutes.")
+    except Exception as _e:
+        logger.warning(f"Drift monitor failed to start: {_e}")
+
     listen_for_wake_word()
 
 

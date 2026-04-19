@@ -33,13 +33,56 @@ OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("NOVA_REFLECTOR_MODEL", "llama3.2:3b")
 EST          = ZoneInfo("America/New_York")
 
-REFLECTION_HOUR        = 22     # 10pm EST
-AUTO_APPROVE_THRESHOLD = 0.85   # >= this → auto-graduate to memories
-LOOKBACK_HOURS         = 24
+REFLECTION_HOUR         = 22     # 10pm EST — general nightly reflection
+TRADING_REFLECTION_HOUR = 18     # 6pm EST — pre-Asia trading-specific reflection
+AUTO_APPROVE_THRESHOLD  = 0.85   # >= this → auto-graduate to memories
+LOOKBACK_HOURS          = 24
+TRADING_LOOKBACK_DAYS   = 14
 
 VALID_CATS = {"trading", "keeplodge", "personal", "ideas", "nova", "general"}
 
 TRADE_LOG_DIR = Path(r"C:\Users\User\nova\nova-brain\01_Trade_Logs")
+
+
+TRADING_REFLECTION_PROMPT = """You are NOVA's trading reflective layer — the part of the brain that reviews trading performance before each Asia session.
+
+Below are the trading memories from the last {lookback_days} days. Produce 1 to 4 INSIGHTS: actionable patterns, drawdown flags, setup-quality observations, or sessional tendencies that Sir should know before the next session.
+
+Categories of things to look for:
+- A specific session (Asia / London / NY_AM) performing better or worse than others
+- A specific setup type / sweep combination that's winning or losing
+- Consecutive losses (3+ in a row) that suggest a drawdown is forming
+- Grade-A trades being taken outside optimal session windows
+- Energy/mindset correlating with win rate
+- Changes in market regime (VIX, volatility) matching changes in outcomes
+
+TRADING MEMORIES (last {lookback_days} days):
+{trading_memories}
+
+OBSIDIAN TRADE LOGS (last {lookback_days} days):
+{trades}
+
+RULES:
+- Return JSON ONLY. No prose, no markdown, no backticks.
+- category MUST be "trading".
+- Each insight cites source memory IDs in "sources".
+- confidence 0.0 to 1.0. Be honest — below 0.6 means uncertain.
+- Skip if signal is low. Return [] rather than fabricate.
+- Insights must be actionable — "avoid X setup in Y session" not "trading has been happening".
+
+Output schema:
+[
+  {{
+    "summary": "one line under 120 chars",
+    "content": "the insight, 2 to 4 sentences, actionable",
+    "category": "trading",
+    "sources": ["mem_id_1", "mem_id_2"],
+    "confidence": 0.85
+  }}
+]
+
+If nothing actionable emerges, return: []
+"""
 
 
 REFLECTION_PROMPT = """You are NOVA's reflective layer — the part of the brain that thinks overnight.
@@ -139,6 +182,41 @@ def _format_memories(mems: list[dict]) -> str:
 
 
 # ── Ollama ─────────────────────────────────────────────────────────────────
+
+async def _recent_trading_memories(days: int = TRADING_LOOKBACK_DAYS) -> list[dict]:
+    """Pull trading-category memories from the last N days."""
+    cutoff = time.time() - days * 86400
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("""
+            SELECT id, summary, content, category, tags, created_at
+            FROM memories
+            WHERE category = 'trading' AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 100
+        """, (cutoff,))
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+def _recent_trade_logs_days(days: int = TRADING_LOOKBACK_DAYS) -> list[str]:
+    """Variant of _recent_trade_logs that looks back N days instead of N hours."""
+    if not TRADE_LOG_DIR.exists():
+        return []
+    cutoff = time.time() - days * 86400
+    entries = []
+    for f in sorted(TRADE_LOG_DIR.glob("*.md"), reverse=True):
+        try:
+            if f.stat().st_mtime < cutoff:
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            entries.append(f"--- {f.name} ---\n{text[:600]}")
+        except Exception:
+            continue
+        if len(entries) >= 20:
+            break
+    return entries
+
 
 async def _call_ollama(prompt: str, timeout: float = 600.0) -> str:
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -357,24 +435,105 @@ async def run_reflection() -> dict:
     }
 
 
+# ── Trading reflection — pre-Asia session pass ─────────────────────────────
+
+async def run_trading_reflection() -> dict:
+    """
+    Trading-specific reflection focused on session-by-session patterns,
+    drawdown detection, and setup-quality signals. Runs pre-Asia (6pm EST)
+    so Sir goes into the evening session with fresh insights.
+    """
+    await init_pending_table()
+
+    mems   = await _recent_trading_memories()
+    trades = _recent_trade_logs_days()
+
+    if not mems and not trades:
+        return {"ok": True, "count": 0, "reason": "no trading data in lookback window"}
+
+    prompt = TRADING_REFLECTION_PROMPT.format(
+        lookback_days=TRADING_LOOKBACK_DAYS,
+        trading_memories=_format_memories(mems),
+        trades=("\n\n".join(trades) if trades else "(no Obsidian trade logs in lookback window)"),
+    )
+
+    print(f"[trading-reflector] calling {OLLAMA_MODEL} with {len(mems)} memories, {len(trades)} trade logs")
+    try:
+        raw = await _call_ollama(prompt)
+    except Exception as e:
+        return {
+            "ok": False,
+            "reason": f"ollama error: {type(e).__name__}: {e}",
+            "model": OLLAMA_MODEL,
+            "count": 0,
+        }
+
+    insights = _extract_json_array(raw)
+    if not insights:
+        return {"ok": True, "count": 0, "approved": 0, "pending": 0,
+                "reason": "no trading insights emitted", "raw_preview": raw[:200]}
+
+    approved, pending, persisted = 0, 0, []
+    for ins in insights:
+        # Force category to trading regardless of model output
+        ins["category"] = "trading"
+        result = await _persist_insight(ins)
+        if not result.get("ok"):
+            continue
+        persisted.append(result)
+        if result.get("status") == "approved":
+            approved += 1
+        else:
+            pending += 1
+
+    return {
+        "ok":         True,
+        "kind":       "trading",
+        "count":      len(persisted),
+        "approved":   approved,
+        "pending":    pending,
+        "raw_count":  len(insights),
+        "insights":   persisted,
+        "ran_at_est": datetime.now(tz=EST).isoformat(),
+    }
+
+
 # ── Scheduler ──────────────────────────────────────────────────────────────
 
 async def scheduler_loop():
-    """Fires run_reflection at REFLECTION_HOUR EST every day."""
+    """
+    Dual scheduler:
+    - REFLECTION_HOUR (22:00 EST)         → general nightly reflection (run_reflection)
+    - TRADING_REFLECTION_HOUR (18:00 EST) → pre-Asia trading reflection (run_trading_reflection)
+    Both run on the same asyncio task, which picks the nearest upcoming target.
+    """
     await init_pending_table()
     while True:
         now_est = datetime.now(tz=EST)
-        target  = now_est.replace(hour=REFLECTION_HOUR, minute=0, second=0, microsecond=0)
-        if target <= now_est:
-            target = target + timedelta(days=1)
+
+        def _next_slot(hour: int):
+            t = now_est.replace(hour=hour, minute=0, second=0, microsecond=0)
+            return t if t > now_est else t + timedelta(days=1)
+
+        next_general = _next_slot(REFLECTION_HOUR)
+        next_trading = _next_slot(TRADING_REFLECTION_HOUR)
+
+        if next_trading < next_general:
+            target, kind = next_trading, "trading"
+        else:
+            target, kind = next_general, "general"
+
         wait_s = (target - now_est).total_seconds()
-        print(f"[reflector] next reflection at {target.isoformat()} (sleeping {wait_s:.0f}s)")
+        print(f"[reflector] next {kind} reflection at {target.isoformat()} (sleeping {wait_s:.0f}s)")
         try:
             await asyncio.sleep(wait_s)
         except asyncio.CancelledError:
             return
         try:
-            result = await run_reflection()
-            print(f"[reflector] result: {result}")
+            if kind == "trading":
+                result = await run_trading_reflection()
+            else:
+                result = await run_reflection()
+            print(f"[reflector] {kind} result: {result}")
         except Exception as e:
-            print(f"[reflector] ERROR: {e}")
+            print(f"[reflector] {kind} ERROR: {e}")

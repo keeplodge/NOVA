@@ -13,7 +13,7 @@ from memory import (
     get_conversation_history, CATEGORIES
 )
 from reflector import (
-    init_pending_table, scheduler_loop, run_reflection,
+    init_pending_table, scheduler_loop, run_reflection, run_trading_reflection,
     list_pending, approve_insight, reject_insight,
 )
 
@@ -204,6 +204,20 @@ async def add_memory_rest(body: MemoryIn):
 @app.get("/insights/pending")
 async def insights_pending():
     return await list_pending()
+
+
+@app.post("/insights/run-trading")
+async def insights_run_trading():
+    """Manual trigger. Runs the trading-focused reflection pass (14-day lookback)."""
+    result = await run_trading_reflection()
+    for ins in result.get("insights", []):
+        mem = ins.get("memory")
+        if mem:
+            await broadcast("brain:memory_added", {"memory": mem})
+    await broadcast("brain:insights_updated", {
+        "pending_count": len(await list_pending()),
+    })
+    return result
 
 
 @app.post("/insights/run")
