@@ -38,7 +38,7 @@ def _webhook_auth_ok(req) -> tuple[bool, str]:
 # ── Config ────────────────────────────────────────────────────────────────────
 TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL", "")
 MAX_TRADES_PER_SESSION  = 1
-MAX_TRADES_PER_DAY      = 3
+MAX_TRADES_PER_DAY      = 2   # London + NY AM — one per session
 MAX_DAILY_LOSS          = 500.00   # USD
 RISK_PER_TRADE          = 500.00   # USD
 REWARD_PER_TRADE        = 1000.00  # USD
@@ -85,14 +85,21 @@ def build_equity_data() -> list[dict]:
     return result
 
 # ── Session windows (EST) ─────────────────────────────────────────────────────
+# NOVA trades ONLY NQ futures, London + NY AM. Asia session and weekend crypto
+# are permanently removed — Sir's ICT edge is proven on NQ 15m during these
+# two windows only. See feedback memory "Trading scope".
 SESSIONS = {
-    "Asia":   {"start": (19, 0),  "end": (23, 0)},
     "London": {"start": (2,  0),  "end": (5,  0)},
     "NY_AM":  {"start": (8, 30),  "end": (11, 0)},
 }
 
-# Crypto tickers — accepted on weekends when futures are closed
-CRYPTO_TICKERS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BTCUSD", "ETHUSD", "SOLUSD", "XBTUSD"}
+# NQ-only ticker allowlist. Pine's {{ticker}} can render as any of these
+# depending on contract rollover / micro vs mini. Normalized uppercase, with
+# optional exchange prefix stripped at the gate.
+ALLOWED_TICKERS = {
+    "NQ1!", "NQ", "NQU2026", "NQZ2026", "NQH2027", "NQM2026", "NQM2027",  # mini continuous + common quarterly fronts
+    "MNQ1!", "MNQ", "MNQU2026", "MNQZ2026", "MNQH2027", "MNQM2026", "MNQM2027",  # micro NQ equivalents
+}
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 state = {
@@ -216,7 +223,7 @@ def forward_to_traderspost(payload: dict) -> tuple[bool, str]:
 
 # ── Obsidian trade log ────────────────────────────────────────────────────────
 
-SESSION_DISPLAY = {"Asia": "Asia", "London": "London", "NY_AM": "NY AM"}
+SESSION_DISPLAY = {"London": "London", "NY_AM": "NY AM"}
 SIDE_MAP        = {"buy": "long", "sell": "short"}
 TYPE_MAP        = {"first": "First entry", "cont": "Continuation", "continuation": "Continuation"}
 
@@ -348,21 +355,28 @@ def update_trade_log_result(path: str, outcome: str, exit_price: float) -> bool:
 
 # ── Gate evaluator (shared by /webhook and /execute) ──────────────────────────
 
+def _normalize_ticker(raw: str) -> str:
+    """Strip exchange prefix if present (CME_MINI:NQ1! -> NQ1!) and upper."""
+    t = (raw or "").upper().strip()
+    if ":" in t:
+        t = t.split(":", 1)[1]
+    return t
+
+
 def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool, str, dict]:
     """
     Run every risk gate. Returns (ok, reason_if_blocked, gate_state).
     gate_state is always populated for dry-run reporting.
+
+    Scope (per feedback memory "Trading scope"):
+      - Instrument: NQ futures ONLY (ALLOWED_TICKERS allowlist)
+      - Sessions:   London (02:00-05:00 EST) + NY AM (08:30-11:00 EST) ONLY
+      - Weekends:   all futures trading rejected
     """
-    is_crypto  = ticker.upper() in CRYPTO_TICKERS
+    norm       = _normalize_ticker(ticker)
+    is_allowed = norm in ALLOWED_TICKERS
     is_weekend = now.weekday() >= 5
     session    = get_current_session(now)
-
-    # Weekend crypto exemption: weekday discipline stays tight, but on Sat/Sun
-    # crypto signals outside Asia/London/NY_AM get their own "Weekend_Crypto"
-    # lane so the Pine weekend crypto study can actually execute. All other
-    # gates (grade, 1/session, 3/day, $500 loss cap) still apply.
-    if is_weekend and is_crypto and session is None:
-        session = "Weekend_Crypto"
 
     session_count = state["session_trades"].get(session, 0) if session else 0
 
@@ -370,26 +384,31 @@ def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool,
         "now_est":         now.strftime("%Y-%m-%d %H:%M:%S"),
         "session":         session,
         "is_weekend":      is_weekend,
-        "is_crypto":       is_crypto,
+        "ticker_norm":     norm,
+        "ticker_allowed":  is_allowed,
         "session_trades":  session_count,
         "trades_today":    state["trades_today"],
         "daily_loss":      state["daily_loss"],
-        "open_position":   ticker.upper() in state["open_positions"],
+        "open_position":   norm in state["open_positions"],
         "grade":           grade,
     }
 
-    if is_weekend and not is_crypto:
-        return False, f"Rejected — futures market closed on weekend ({ticker})", gate_state
+    # Hard instrument allowlist — first gate so misconfigured alerts never
+    # even reach the session check
+    if not is_allowed:
+        return False, f"Rejected — NOVA trades NQ futures only (got '{ticker}')", gate_state
+    if is_weekend:
+        return False, f"Rejected — futures market closed on weekend ({norm})", gate_state
     if session is None:
-        return False, f"Rejected — outside all trading sessions ({now.strftime('%H:%M %Z')})", gate_state
+        return False, f"Rejected — outside London/NY_AM sessions ({now.strftime('%H:%M %Z')})", gate_state
     if session_count >= MAX_TRADES_PER_SESSION:
         return False, f"Rejected — max {MAX_TRADES_PER_SESSION} trade(s) already in {session}", gate_state
     if state["trades_today"] >= MAX_TRADES_PER_DAY:
         return False, f"Rejected — daily trade limit of {MAX_TRADES_PER_DAY} reached", gate_state
     if state["daily_loss"] >= MAX_DAILY_LOSS:
         return False, f"Rejected — daily loss limit of ${MAX_DAILY_LOSS:.2f} reached", gate_state
-    if ticker.upper() in state["open_positions"]:
-        return False, f"Rejected — position already open for {ticker.upper()}", gate_state
+    if norm in state["open_positions"]:
+        return False, f"Rejected — position already open for {norm}", gate_state
 
     return True, "OK", gate_state
 

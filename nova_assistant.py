@@ -476,8 +476,8 @@ def get_nova_status() -> dict:
 def get_session_countdown() -> str:
     """Return a natural-language countdown to the next trading session."""
     now      = datetime.now(tz=EST)
+    # Scope: London + NY AM only (see feedback memory "Trading scope")
     sessions = [
-        ("Asia",   now.replace(hour=19, minute=0,  second=0, microsecond=0)),
         ("London", now.replace(hour=2,  minute=0,  second=0, microsecond=0)),
         ("NY AM",  now.replace(hour=8,  minute=30, second=0, microsecond=0)),
     ]
