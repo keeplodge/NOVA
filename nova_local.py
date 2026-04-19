@@ -103,16 +103,22 @@ if not logger.handlers:
     logger.addHandler(_fh)
     logger.addHandler(_sh)
 
-# ── Colours ────────────────────────────────────────────────────────────────────
-C_BG       = "#020408"
-C_CYAN     = "#00d4ff"   # listening / idle calm
-C_WHITE    = "#FFFFFF"   # speaking
-C_GREEN    = "#00ff88"   # trade detected / session active / in profit
-C_RED      = "#ff3355"   # alert / loss warning
-C_TEXT     = "#4a6a7a"
-C_TITLE    = "#00d4ff"
-C_SUBTITLE = "#1a3a4a"
-C_BRACKET  = "#0a2030"   # HUD corner brackets (dim)
+# ── Colours — mirrors the Neural Brain design system tokens ───────────────────
+C_BG          = "#0A1929"   # Blueprint Navy — primary surface
+C_BG_ALT      = "#0F2238"   # Navy 2 — card surfaces
+C_BORDER      = "#1A2F47"   # Navy border — panel edges
+C_GRID        = "#0f253d"   # Faint blueprint grid line
+C_CYAN        = "#00d4ff"   # listening / default idle
+C_WHITE       = "#FFFFFF"   # speaking
+C_GREEN       = "#00ff88"   # trade detected / session active / in profit
+C_RED         = "#ff3355"   # alert / loss warning
+C_ORANGE      = "#FF6B00"   # Signal Orange — CTAs only (used for node accents)
+C_STEEL       = "#A0AEC0"   # secondary text on dark
+C_STEEL_DARK  = "#4A5568"   # tertiary text
+C_TEXT        = "#4a6a7a"
+C_TITLE       = "#FFFFFF"   # title is pure white with orange accent
+C_SUBTITLE    = "#A0AEC0"
+C_BRACKET     = "#1A2F47"   # HUD corner brackets (subtle)
 
 # Adaptive tint palette — used by the market-state poller when assistant is idle
 C_AMBER       = "#ff9d00"   # high VIX / elevated volatility
@@ -200,15 +206,65 @@ def _pick_tint_from_state(vix: float | None, status: dict | None) -> tuple[str, 
     return C_CYAN, ""
 
 
+def _push_state(state: dict):
+    """Merge a live_state patch into the GUI queue — goes into stat panels."""
+    _gui_queue.put({"state": state})
+
+
+def _brain_stats() -> tuple[str, str]:
+    """Return (brain_status_label, memory_count_label). Never raises."""
+    try:
+        import sys as _s
+        _bp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neural-brain", "backend")
+        if _bp not in _s.path:
+            _s.path.insert(0, _bp)
+        from brain_bridge import sync_online, sync_recent
+        if not sync_online():
+            return "OFFLINE", "--"
+        recent = sync_recent(limit=200)
+        return "ONLINE", str(len(recent))
+    except Exception:
+        return "OFFLINE", "--"
+
+
 def market_state_poller_loop():
-    """Background thread — polls market + account state every 60s."""
-    logger.info("Market state poller armed — tinting waveform from live data.")
+    """
+    Background thread — polls market + account state every 60s. Drives both
+    the adaptive-tint color AND the side stat panels via live_state patches.
+    """
+    logger.info("Market state poller armed — tinting waveform + live stats.")
     while True:
         try:
             vix    = _fetch_vix_latest()
             status = _fetch_nova_status()
             color, label = _pick_tint_from_state(vix, status)
+
+            # Tint the waveform
             _push_color_only(color, label)
+
+            # Populate the side stat panels
+            brain_status, brain_mems = _brain_stats()
+            patch = {
+                "session":        (status or {}).get("active_session", "None") or "None",
+                "vix":            f"{vix:.1f}" if vix is not None else "--",
+                "daily_loss":     f"${(status or {}).get('daily_loss', 0):.0f}",
+                "remaining":      f"${(status or {}).get('loss_remaining', 500):.0f}",
+                "trades_today":   str((status or {}).get("trades_today", 0)),
+                "brain_status":   brain_status,
+                "brain_memories": brain_mems,
+            }
+
+            # Try to fetch NQ price separately (falls back to --)
+            try:
+                import yfinance as yf
+                nq_t = yf.Ticker("NQ=F")
+                nq_hist = nq_t.history(period="1d", interval="5m")
+                if nq_hist is not None and not nq_hist.empty:
+                    patch["nq_price"] = f"{float(nq_hist['Close'].iloc[-1]):.1f}"
+            except Exception:
+                pass
+
+            _push_state(patch)
         except Exception as e:
             logger.debug(f"market state poll failed: {e}")
         time.sleep(MARKET_POLL_INTERVAL)
@@ -698,22 +754,34 @@ def run_scheduler():
 # ── NOVA GUI ───────────────────────────────────────────────────────────────────
 
 class NOVAApp:
-    # Canvas dimensions
-    W        = 720
-    H        = 560
+    # Canvas dimensions — wider dashboard layout matching the Brain aesthetic
+    W        = 1000
+    H        = 680
     FRAME_MS = 28   # ~35 fps
 
-    # Orb
-    ORB_CX   = 360
-    ORB_CY   = 260
-    ORB_R    = 54   # core radius
+    # Orb — centered in main canvas area
+    ORB_CX   = 500
+    ORB_CY   = 320
+    ORB_R    = 70
 
     # Waveform
-    NUM_BARS = 36
-    BAR_AREA_Y = 370   # top of waveform area
-    BAR_H_MAX  = 52
+    NUM_BARS = 48
+    BAR_AREA_Y = 440
+    BAR_H_MAX  = 56
     BAR_GAP    = 4
     LERP       = 0.20
+
+    # Grid pattern (Blueprint texture)
+    GRID_STEP = 48
+
+    # Side stat panels
+    PANEL_W      = 220
+    PANEL_MARGIN = 28
+    PANEL_TOP    = 120
+    PANEL_H      = 310
+
+    # Neural-link strip (bottom)
+    STRIP_H = 44
 
     def __init__(self, root: tk.Tk):
         self.root   = root
@@ -723,6 +791,18 @@ class NOVAApp:
         self.heights        = [2.0] * self.NUM_BARS
         self.target_heights = [2.0] * self.NUM_BARS
         self.status_text    = "INITIALISING..."
+
+        # Live data cached by the market poller — shown in the side panels
+        self.live_state = {
+            "session":       "None",
+            "nq_price":      "--",
+            "vix":           "--",
+            "daily_loss":    "$0",
+            "trades_today":  "0",
+            "remaining":     "$500",
+            "brain_status":  "CHECKING",
+            "brain_memories": "--",
+        }
 
         self._build_ui()
         self._animate()
@@ -759,91 +839,114 @@ class NOVAApp:
         )
         self.canvas.pack()
 
-        # ── HUD corner brackets ────────────────────────────────────────────────
-        BL = 28   # bracket leg length
-        BT = 2    # bracket thickness
-        M  = 14   # margin from edge
-        corners = [
-            # top-left
-            [(M, M+BL, M, M, M+BL, M)],
-            # top-right
-            [(self.W-M-BL, M, self.W-M, M, self.W-M, M+BL)],
-            # bottom-left
-            [(M, self.H-M-BL, M, self.H-M, M+BL, self.H-M)],
-            # bottom-right
-            [(self.W-M-BL, self.H-M, self.W-M, self.H-M, self.W-M, self.H-M-BL)],
-        ]
-        for poly in corners:
-            self.canvas.create_line(*poly[0], fill=C_CYAN, width=BT)
+        # ── Blueprint grid — faint hairlines every GRID_STEP px ───────────────
+        for x in range(0, self.W, self.GRID_STEP):
+            self.canvas.create_line(x, 0, x, self.H, fill=C_GRID, width=1)
+        for y in range(0, self.H, self.GRID_STEP):
+            self.canvas.create_line(0, y, self.W, y, fill=C_GRID, width=1)
 
-        # ── Title — layered for glow effect ───────────────────────────────────
-        tx, ty = self.W // 2, 42
-        for offset, alpha in [(3, 0.12), (2, 0.22), (1, 0.45)]:
-            col = self._dim(C_CYAN, alpha)
+        # ── Top bar: logo mark + wordmark + subtitle ──────────────────────────
+        # Logo mark (orange square with "N" inside) — mirrors the Brain's design
+        mx, my = 36, 44
+        self.canvas.create_rectangle(
+            mx - 20, my - 20, mx + 20, my + 20,
+            fill=C_ORANGE, outline="",
+        )
+        self.canvas.create_text(
+            mx, my + 1,
+            text="N",
+            font=("Arial Black", 20),
+            fill=C_WHITE, anchor="center",
+        )
+        # Wordmark
+        self.canvas.create_text(
+            70, 34,
+            text="NOVA",
+            font=("Arial Black", 18),
+            fill=C_WHITE, anchor="w",
+        )
+        self.canvas.create_text(
+            70, 56,
+            text="ASSISTANT",
+            font=("Consolas", 9, "bold"),
+            fill=C_ORANGE, anchor="w",
+        )
+        # Subtitle (right side — status overline)
+        self.canvas.create_text(
+            self.W - 28, 44,
+            text="NEURAL OPERATIONS · VOICE ASSISTANT · V2",
+            font=("Consolas", 9, "bold"),
+            fill=C_STEEL_DARK, anchor="e",
+        )
+
+        # ── Horizontal divider under header ───────────────────────────────────
+        self.canvas.create_line(
+            0, 84, self.W, 84,
+            fill=C_BORDER, width=1,
+        )
+
+        # ── Title — massive centered, layered glow ────────────────────────────
+        tx, ty = self.W // 2, 112
+        for offset, alpha in [(2, 0.22), (1, 0.45)]:
+            col = self._dim(C_WHITE, alpha)
             for dx in (-offset, 0, offset):
                 for dy in (-offset, 0, offset):
                     if dx == 0 and dy == 0:
                         continue
                     self.canvas.create_text(
                         tx + dx, ty + dy,
-                        text="N.O.V.A.",
-                        font=("Courier New", 30, "bold"),
+                        text="N · O · V · A",
+                        font=("Arial Black", 26),
                         fill=col, anchor="center",
                     )
         self.title_id = self.canvas.create_text(
             tx, ty,
-            text="N.O.V.A.",
-            font=("Courier New", 30, "bold"),
-            fill=C_CYAN, anchor="center",
+            text="N · O · V · A",
+            font=("Arial Black", 26),
+            fill=C_TITLE, anchor="center",
         )
 
-        # ── Subtitle ──────────────────────────────────────────────────────────
-        self.canvas.create_text(
-            self.W // 2, 76,
-            text="Neural Operations and Voice Assistant",
-            font=("Courier New", 9),
-            fill=C_SUBTITLE, anchor="center",
+        # ── LEFT stat panel — market state ────────────────────────────────────
+        self._build_stat_panel(
+            x=self.PANEL_MARGIN, y=self.PANEL_TOP,
+            w=self.PANEL_W, h=self.PANEL_H,
+            heading="MARKET STATE",
+            heading_color=C_ORANGE,
+            rows=[
+                ("SESSION",  "session",      C_WHITE),
+                ("NQ",       "nq_price",     C_WHITE),
+                ("VIX",      "vix",          C_WHITE),
+                ("STATUS",   "brain_status", C_CYAN),
+            ],
         )
 
-        # ── Thin horizontal rule below subtitle ───────────────────────────────
-        self.canvas.create_line(
-            60, 96, self.W - 60, 96,
-            fill=self._dim(C_CYAN, 0.12), width=1,
+        # ── RIGHT stat panel — account + activity ─────────────────────────────
+        self._build_stat_panel(
+            x=self.W - self.PANEL_MARGIN - self.PANEL_W, y=self.PANEL_TOP,
+            w=self.PANEL_W, h=self.PANEL_H,
+            heading="TODAY",
+            heading_color=C_ORANGE,
+            rows=[
+                ("DAILY LOSS",    "daily_loss",    C_RED),
+                ("REMAINING",     "remaining",     C_GREEN),
+                ("TRADES TODAY",  "trades_today",  C_WHITE),
+                ("MEMORIES",      "brain_memories", C_CYAN),
+            ],
         )
 
-        # ── Orb — concentric glow rings (outermost to innermost) ──────────────
-        self.glow_ids = []
-        glow_layers = [
-            (self.ORB_R + 38, 0.04),
-            (self.ORB_R + 26, 0.08),
-            (self.ORB_R + 16, 0.14),
-            (self.ORB_R + 8,  0.24),
-            (self.ORB_R + 3,  0.45),
-        ]
-        for radius, alpha in glow_layers:
-            gid = self.canvas.create_oval(
-                self.ORB_CX - radius, self.ORB_CY - radius,
-                self.ORB_CX + radius, self.ORB_CY + radius,
-                fill=self._dim(C_CYAN, alpha), outline="",
-            )
-            self.glow_ids.append((gid, radius, alpha))
+        # ── Wireframe orb — nodes + edges (Fibonacci-distributed) ─────────────
+        self._build_wireframe_orb()
 
-        # ── Orb core ──────────────────────────────────────────────────────────
-        self.orb_id = self.canvas.create_oval(
-            self.ORB_CX - self.ORB_R, self.ORB_CY - self.ORB_R,
-            self.ORB_CX + self.ORB_R, self.ORB_CY + self.ORB_R,
-            fill=self._dim(C_CYAN, 0.70), outline=C_CYAN, width=1,
-        )
-
-        # ── Waveform bars ─────────────────────────────────────────────────────
-        total_w  = self.W - 120
-        bar_slot = total_w / self.NUM_BARS
-        bar_w    = max(1, bar_slot - self.BAR_GAP)
-        x_start  = 60
+        # ── Waveform bars (under the orb) ─────────────────────────────────────
+        wave_left  = self.PANEL_MARGIN + self.PANEL_W + 24
+        wave_right = self.W - self.PANEL_MARGIN - self.PANEL_W - 24
+        total_w    = wave_right - wave_left
+        bar_slot   = total_w / self.NUM_BARS
+        bar_w      = max(1, bar_slot - self.BAR_GAP)
 
         self.bar_ids = []
         for i in range(self.NUM_BARS):
-            x0  = x_start + i * bar_slot + self.BAR_GAP / 2
+            x0  = wave_left + i * bar_slot + self.BAR_GAP / 2
             x1  = x0 + bar_w
             by  = self.BAR_AREA_Y + self.BAR_H_MAX // 2
             bid = self.canvas.create_rectangle(
@@ -851,19 +954,168 @@ class NOVAApp:
                 fill=self._dim(C_CYAN, 0.5), outline="",
             )
             self.bar_ids.append(bid)
+        self._bar_bounds = (wave_left, wave_right)
 
-        # ── Thin rule above status ─────────────────────────────────────────────
+        # ── Neural-link strip (bottom) ────────────────────────────────────────
+        strip_y = self.H - self.STRIP_H
+        self.canvas.create_rectangle(
+            0, strip_y, self.W, self.H,
+            fill=C_BG_ALT, outline="",
+        )
         self.canvas.create_line(
-            60, self.H - 52, self.W - 60, self.H - 52,
-            fill=self._dim(C_CYAN, 0.12), width=1,
+            0, strip_y, self.W, strip_y,
+            fill=C_BORDER, width=1,
+        )
+        # Left: brain link label with pulse dot
+        self._link_dot = self.canvas.create_oval(
+            self.PANEL_MARGIN, strip_y + 18,
+            self.PANEL_MARGIN + 10, strip_y + 28,
+            fill=C_GREEN, outline="",
+        )
+        self.canvas.create_text(
+            self.PANEL_MARGIN + 20, strip_y + 23,
+            text="LINKED TO NEURAL BRAIN",
+            font=("Consolas", 10, "bold"),
+            fill=C_STEEL, anchor="w",
+        )
+        # Center: current status (animated)
+        self.status_id = self.canvas.create_text(
+            self.W // 2, strip_y + 23,
+            text=self.status_text,
+            font=("Consolas", 10, "bold"),
+            fill=C_CYAN, anchor="center",
+        )
+        # Right: memory count + uptime
+        self._uptime_id = self.canvas.create_text(
+            self.W - self.PANEL_MARGIN, strip_y + 23,
+            text="NOVA · V2 · ASSISTANT",
+            font=("Consolas", 9, "bold"),
+            fill=C_STEEL_DARK, anchor="e",
         )
 
-        # ── Status text ───────────────────────────────────────────────────────
-        self.status_id = self.canvas.create_text(
-            self.W // 2, self.H - 30,
-            text=self.status_text,
-            font=("Courier New", 8),
-            fill=C_TEXT, anchor="center",
+    def _build_stat_panel(self, x: int, y: int, w: int, h: int,
+                          heading: str, heading_color: str,
+                          rows: list[tuple[str, str, str]]) -> None:
+        """
+        Stats panel — thin-bordered navy card with an orange overline heading
+        and 4 rows of LABEL / value pairs. Matches the Brain's glass-panel
+        aesthetic within Tkinter's capability envelope.
+        """
+        # Panel background
+        self.canvas.create_rectangle(
+            x, y, x + w, y + h,
+            fill=C_BG_ALT, outline=C_BORDER, width=1,
+        )
+        # Heading (overline style)
+        self.canvas.create_text(
+            x + 16, y + 18,
+            text=heading,
+            font=("Consolas", 10, "bold"),
+            fill=heading_color, anchor="w",
+        )
+        # Thin rule under heading
+        self.canvas.create_line(
+            x + 16, y + 36, x + w - 16, y + 36,
+            fill=C_BORDER, width=1,
+        )
+
+        # Rows
+        if not hasattr(self, "_stat_value_ids"):
+            self._stat_value_ids = {}
+
+        row_y  = y + 58
+        row_dy = (h - 72) // max(len(rows), 1)
+        for label, key, value_color in rows:
+            self.canvas.create_text(
+                x + 16, row_y,
+                text=label,
+                font=("Consolas", 9, "bold"),
+                fill=C_STEEL_DARK, anchor="w",
+            )
+            val_id = self.canvas.create_text(
+                x + w - 16, row_y,
+                text=self.live_state.get(key, "--"),
+                font=("Consolas", 12, "bold"),
+                fill=value_color, anchor="e",
+            )
+            self._stat_value_ids[key] = val_id
+            # Divider under each row except the last
+            if (label, key, value_color) != rows[-1]:
+                self.canvas.create_line(
+                    x + 16, row_y + row_dy // 2,
+                    x + w - 16, row_y + row_dy // 2,
+                    fill=self._dim(C_BORDER, 0.5), width=1,
+                )
+            row_y += row_dy
+
+    def _build_wireframe_orb(self):
+        """
+        Wireframe orb — 14 Fibonacci-distributed nodes on a 2D projection of
+        a sphere, connected by nearest-neighbor edges. Visually echoes the
+        Neural Brain's WebGL wireframe orb within Tkinter's 2D constraints.
+        """
+        import math as _math
+
+        cx, cy, R = self.ORB_CX, self.ORB_CY, self.ORB_R
+        N = 14
+        golden = _math.pi * (3 - _math.sqrt(5))
+        nodes_2d = []  # list of (x, y)
+        for i in range(N):
+            y_norm = 1 - (i / (N - 1)) * 2                # -1..1
+            r_ring = _math.sqrt(1 - y_norm * y_norm)
+            theta  = golden * i
+            x_proj = _math.cos(theta) * r_ring * R
+            y_proj = y_norm * R
+            nodes_2d.append((cx + x_proj, cy + y_proj))
+
+        # Concentric glow rings (behind the wireframe)
+        self.glow_ids = []
+        glow_layers = [
+            (R + 46, 0.03),
+            (R + 32, 0.07),
+            (R + 20, 0.12),
+            (R + 10, 0.20),
+        ]
+        for radius, alpha in glow_layers:
+            gid = self.canvas.create_oval(
+                cx - radius, cy - radius, cx + radius, cy + radius,
+                fill=self._dim(C_CYAN, alpha), outline="",
+            )
+            self.glow_ids.append((gid, radius, alpha))
+
+        # Edges — each node connects to its 3 nearest neighbors, deduped
+        self.orb_edge_ids = []
+        edge_set = set()
+        for i, (xi, yi) in enumerate(nodes_2d):
+            d = sorted(
+                ((j, (xi - nx)**2 + (yi - ny)**2) for j, (nx, ny) in enumerate(nodes_2d) if j != i),
+                key=lambda t: t[1],
+            )
+            for j, _ in d[:3]:
+                key = (min(i, j), max(i, j))
+                if key in edge_set:
+                    continue
+                edge_set.add(key)
+                xj, yj = nodes_2d[j]
+                eid = self.canvas.create_line(
+                    xi, yi, xj, yj,
+                    fill=self._dim(C_CYAN, 0.45), width=1,
+                )
+                self.orb_edge_ids.append(eid)
+
+        # Node dots
+        self.orb_node_ids = []
+        for (nx, ny) in nodes_2d:
+            nid = self.canvas.create_oval(
+                nx - 3, ny - 3, nx + 3, ny + 3,
+                fill=C_CYAN, outline="",
+            )
+            self.orb_node_ids.append(nid)
+
+        # Inner bright core
+        self.orb_id = self.canvas.create_oval(
+            cx - 10, cy - 10, cx + 10, cy + 10,
+            fill=C_WHITE, outline="",
         )
 
     # ── animation loop ────────────────────────────────────────────────────────
@@ -876,6 +1128,9 @@ class NOVAApp:
                 self.color = msg.get("color", self.color)
                 self.mode  = msg.get("mode",  self.mode)
                 status     = msg.get("status", "")
+                state_patch = msg.get("state") or {}
+                if state_patch:
+                    self.live_state.update(state_patch)
                 if status:
                     self.status_text = status.upper()
                     self.canvas.itemconfig(self.status_id, text=self.status_text)
@@ -898,41 +1153,65 @@ class NOVAApp:
             # Very slow idle breath
             pulse = 0.92 + 0.08 * math.sin(self.phase * 0.4)
 
-        r_core = self.ORB_R * pulse
         cx, cy = self.ORB_CX, self.ORB_CY
+
+        # ── Inner bright core — small pulsing dot (not full orb radius) ───────
+        core_r = 7 + 4 * pulse
         self.canvas.coords(
             self.orb_id,
-            cx - r_core, cy - r_core, cx + r_core, cy + r_core,
+            cx - core_r, cy - core_r, cx + core_r, cy + core_r,
         )
-        self.canvas.itemconfig(
-            self.orb_id,
-            fill=self._dim(self.color, 0.55),
-            outline=self.color,
-        )
+        self.canvas.itemconfig(self.orb_id, fill=self.color)
 
         # ── Glow rings ─────────────────────────────────────────────────────────
         glow_pulse = pulse * (1.0 + 0.08 * math.sin(self.phase * 1.1))
         for gid, base_r, alpha in self.glow_ids:
             r = base_r * glow_pulse
-            # Alert/trade: boost glow brightness
             a = alpha * (1.6 if self.mode in ("alert", "trade") else 1.0)
             a = min(a, 1.0)
             self.canvas.coords(gid, cx - r, cy - r, cx + r, cy + r)
             self.canvas.itemconfig(gid, fill=self._dim(self.color, a))
 
-        # ── HUD brackets — flash on alert/trade ────────────────────────────────
-        bracket_col = (
-            self.color if self.mode in ("alert", "trade") and int(self.phase * 4) % 2 == 0
-            else C_CYAN
-        )
-        for item in self.canvas.find_withtag("bracket"):
-            self.canvas.itemconfig(item, fill=bracket_col)
+        # ── Wireframe edges — pulse opacity with activity ─────────────────────
+        edge_alpha = 0.3 + 0.2 * (0.5 + 0.5 * math.sin(self.phase * 0.9))
+        if self.mode in ("alert", "trade"):
+            edge_alpha = 0.7
+        edge_col = self._dim(self.color, edge_alpha)
+        if hasattr(self, "orb_edge_ids"):
+            for eid in self.orb_edge_ids:
+                self.canvas.itemconfig(eid, fill=edge_col)
 
-        # ── Waveform bars ──────────────────────────────────────────────────────
-        total_w  = self.W - 120
+        # ── Wireframe nodes — slight size pulse, bright color ─────────────────
+        node_col = C_WHITE if self.mode in ("speaking", "alert", "trade") else self.color
+        if hasattr(self, "orb_node_ids"):
+            for nid in self.orb_node_ids:
+                self.canvas.itemconfig(nid, fill=node_col)
+
+        # ── Stat panels — refresh values from live_state every frame ──────────
+        if hasattr(self, "_stat_value_ids"):
+            for key, vid in self._stat_value_ids.items():
+                val = str(self.live_state.get(key, "--"))
+                try:
+                    self.canvas.itemconfig(vid, text=val)
+                except Exception:
+                    pass
+
+        # ── Neural-link dot — pulse green when brain online, red otherwise ────
+        if hasattr(self, "_link_dot"):
+            brain_ok = self.live_state.get("brain_status", "") == "ONLINE"
+            link_col = C_GREEN if brain_ok else C_RED
+            dot_pulse = 0.75 + 0.25 * abs(math.sin(self.phase * 1.6))
+            self.canvas.itemconfig(self._link_dot, fill=self._dim(link_col, dot_pulse))
+
+        # ── Status text color — match current state color ─────────────────────
+        self.canvas.itemconfig(self.status_id, fill=self.color)
+
+        # ── Waveform bars — bounded by the space between the stat panels ──────
+        wave_left, wave_right = getattr(self, "_bar_bounds", (60, self.W - 60))
+        total_w  = wave_right - wave_left
         bar_slot = total_w / self.NUM_BARS
         bar_w    = max(1, bar_slot - self.BAR_GAP)
-        x_start  = 60
+        x_start  = wave_left
         by_mid   = self.BAR_AREA_Y + self.BAR_H_MAX // 2
 
         for i in range(self.NUM_BARS):
