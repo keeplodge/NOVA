@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NOVA Assistant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+<div id="loading">
+  <div class="loading-title">NOVA</div>
+  <div class="loading-sub">ASSISTANT</div>
+  <div class="loading-bar"><div class="loading-fill" id="loading-fill"></div></div>
+  <div class="loading-status" id="loading-status">CONNECTING TO BACKEND...</div>
+</div>
+
+<!-- 3D Canvas (wireframe orb lives here) -->
+<div id="canvas-container"></div>
+
+<!-- Titlebar -->
+<header id="titlebar">
+  <div class="brand">
+    <div class="logo-mark">N</div>
+    <div class="wordmark">
+      NOVA <span class="accent">ASSISTANT</span>
+    </div>
+  </div>
+  <div class="tagline">NEURAL OPERATIONS · VOICE · TRADING</div>
+  <div class="status-pill">
+    <span id="link-dot" class="pulse-dot"></span>
+    <span id="link-label">BRAIN</span>
+  </div>
+</header>
+
+<!-- Left panel: market state -->
+<section class="panel panel-left glass-panel">
+  <div class="panel-title">
+    MARKET STATE
+    <span id="market-badge" class="state-chip">IDLE</span>
+  </div>
+  <div class="stat-row"><span class="stat-label">Session</span><span class="stat-value" id="stat-session">—</span></div>
+  <div class="stat-row"><span class="stat-label">NQ</span><span class="stat-value" id="stat-nq">—</span></div>
+  <div class="stat-row"><span class="stat-label">VIX</span><span class="stat-value" id="stat-vix">—</span></div>
+  <div class="stat-row"><span class="stat-label">Brain</span><span class="stat-value" id="stat-brain-status">—</span></div>
+  <div class="stat-row"><span class="stat-label">Memories</span><span class="stat-value" id="stat-memories">—</span></div>
+
+  <div class="bars-block">
+    <div class="bars-header">NEUROMODULATORS</div>
+    <div class="bar-row"><span>TRADE</span><div class="bar-track"><div class="bar-fill trading" id="bar-trading"></div></div></div>
+    <div class="bar-row"><span>IDEAS</span><div class="bar-track"><div class="bar-fill ideas" id="bar-ideas"></div></div></div>
+    <div class="bar-row"><span>NOVA</span> <div class="bar-track"><div class="bar-fill nova" id="bar-nova"></div></div></div>
+    <div class="bar-row"><span>PERS</span> <div class="bar-track"><div class="bar-fill personal" id="bar-personal"></div></div></div>
+  </div>
+</section>
+
+<!-- Right panel: today -->
+<section class="panel panel-right glass-panel">
+  <div class="panel-title">
+    TODAY
+    <span id="today-badge" class="state-chip">READY</span>
+  </div>
+  <div class="stat-row"><span class="stat-label">Daily loss</span><span class="stat-value" id="stat-loss">—</span></div>
+  <div class="stat-row"><span class="stat-label">Remaining</span><span class="stat-value success" id="stat-remaining">—</span></div>
+  <div class="stat-row"><span class="stat-label">Trades today</span><span class="stat-value" id="stat-trades">—</span></div>
+  <div class="stat-row"><span class="stat-label">Last signal</span><span class="stat-value" id="stat-last-signal">—</span></div>
+
+  <div class="time-block">
+    <div class="time-label">NEXT SESSION</div>
+    <div class="time-value" id="stat-next-session">—</div>
+    <div class="time-sub" id="stat-next-sub">—</div>
+  </div>
+</section>
+
+<!-- Center bottom: waveform + command log -->
+<section class="panel panel-center glass-panel">
+  <div class="panel-title">
+    ASSISTANT
+    <span id="mode-badge" class="state-chip">IDLE</span>
+  </div>
+  <div id="wave-container">
+    <canvas id="wave-canvas" width="800" height="90"></canvas>
+  </div>
+  <div id="log-container">
+    <div id="log-list"></div>
+  </div>
+</section>
+
+<!-- Bottom strip -->
+<footer id="neural-strip">
+  <div class="strip-left">
+    <span id="footer-dot" class="pulse-dot"></span>
+    <span>LINKED TO NEURAL BRAIN · PORT 7337</span>
+  </div>
+  <div class="strip-center" id="footer-status">INITIALIZING</div>
+  <div class="strip-right">NOVA · ASSISTANT · V2</div>
+</footer>
+
+<script type="module" src="/static/assistant.js"></script>
+
+</body>
+</html>

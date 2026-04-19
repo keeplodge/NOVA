@@ -178,8 +178,8 @@ async def memories():
     return await get_all_memories()
 
 @app.get("/recent")
-async def recent():
-    return await get_recent_memories(20)
+async def recent(limit: int = 20):
+    return await get_recent_memories(limit)
 
 @app.get("/search")
 async def search(q: str, limit: int = 6):
