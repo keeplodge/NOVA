@@ -27,12 +27,15 @@ const HEALTH_URL = `http://${UI_HOST}:${UI_PORT}/health`;
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const SERVER_PY    = path.join(PROJECT_ROOT, 'nova_ui_server.py');
 const ASSISTANT_PY = path.join(PROJECT_ROOT, 'nova_assistant.py');
+const GUARDIAN_PY  = path.join(PROJECT_ROOT, 'nova_tv_guardian.py');
 
-let mainWindow  = null;
-let tray        = null;
-let pyProc      = null;  // nova_ui_server (dashboard sidecar)
-let assistProc  = null;  // nova_assistant  (voice + scheduler)
-let voiceEnabled = true;
+let mainWindow    = null;
+let tray          = null;
+let pyProc        = null;  // nova_ui_server   (dashboard sidecar)
+let assistProc    = null;  // nova_assistant   (voice + scheduler)
+let guardianProc  = null;  // nova_tv_guardian (TradingView chart watchdog)
+let voiceEnabled    = true;
+let guardianEnabled = true;
 
 // ── Python server boot ──────────────────────────────────────────────────────
 function findPython() {
@@ -102,6 +105,37 @@ function setVoice(on) {
   voiceEnabled = !!on;
   if (voiceEnabled) startAssistant();
   else killAssistant();
+}
+
+// ── TradingView Guardian (nova_tv_guardian.py) ──────────────────────────────
+function startGuardian() {
+  if (guardianProc) return;
+  const py = findPython();
+  console.log(`[nova-desktop] launching TV guardian ${py} ${GUARDIAN_PY}`);
+  guardianProc = spawn(py, [GUARDIAN_PY], {
+    cwd:   PROJECT_ROOT,
+    env:   { ...process.env, NOVA_UI_URL: UI_URL.replace(/\/$/, '') },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  guardianProc.stdout.on('data', (b) => process.stdout.write(`[guardian] ${b}`));
+  guardianProc.stderr.on('data', (b) => process.stderr.write(`[guardian] ${b}`));
+  guardianProc.on('exit', (code) => {
+    console.warn(`[nova-desktop] TV guardian exited ${code}`);
+    guardianProc = null;
+  });
+}
+
+function killGuardian() {
+  if (!guardianProc) return;
+  try { guardianProc.kill(); } catch {}
+  guardianProc = null;
+}
+
+function setGuardian(on) {
+  guardianEnabled = !!on;
+  if (guardianEnabled) startGuardian();
+  else killGuardian();
 }
 
 function waitForHealth(maxMs = 30000, intervalMs = 400) {
@@ -176,6 +210,10 @@ function createTray() {
       type:  'checkbox',
       checked: voiceEnabled,
       click: (item) => setVoice(item.checked) },
+    { label: 'TV Guardian (chart watchdog)',
+      type:  'checkbox',
+      checked: guardianEnabled,
+      click: (item) => setGuardian(item.checked) },
     { label: 'Reload',
       click: () => mainWindow && mainWindow.reload() },
     { type: 'separator' },
@@ -211,7 +249,8 @@ app.whenReady().then(async () => {
   }
   // Boot the voice assistant AFTER the sidecar is healthy so its initial
   // push_log/push_mode calls land on a running server.
-  if (voiceEnabled) startAssistant();
+  if (voiceEnabled)    startAssistant();
+  if (guardianEnabled) startGuardian();
   createWindow();
   createTray();
 });
@@ -221,5 +260,5 @@ app.on('window-all-closed', (e) => {
   if (!app.isQuitting) e.preventDefault?.();
 });
 app.on('before-quit', () => { app.isQuitting = true; });
-app.on('will-quit',   () => { killAssistant(); killPythonServer(); });
-process.on('exit',    () => { killAssistant(); killPythonServer(); });
+app.on('will-quit',   () => { killGuardian(); killAssistant(); killPythonServer(); });
+process.on('exit',    () => { killGuardian(); killAssistant(); killPythonServer(); });

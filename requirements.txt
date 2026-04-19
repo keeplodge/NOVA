@@ -8,3 +8,5 @@ pygame-ce
 schedule==1.2.2
 yfinance==0.2.54
 anthropic
+mcp
+pychrome
