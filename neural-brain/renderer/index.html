@@ -1625,62 +1625,149 @@ class BrainCore {
     this.time = 0;
 
     const RADIUS = 0.22;
-    const LINE_COUNT = 260;          // number of chord lines through the sphere
+    const NODE_COUNT = 110;          // points distributed evenly on sphere surface
+    const EDGE_NEIGHBORS = 4;        // each node connects to its N nearest neighbors
 
-    // Build line segments: each line is a chord between two random points on the sphere surface
-    const posArr = new Float32Array(LINE_COUNT * 2 * 3);
-    const colArr = new Float32Array(LINE_COUNT * 2 * 3);
-    const brightCore = new THREE.Color(0xeaffff);     // near-white brightest
-    const electricBlue = new THREE.Color(0x00e5ff);   // primary cyan
-    const deepBlue = new THREE.Color(0x0077aa);       // darker blue for variation
-
-    for (let i = 0; i < LINE_COUNT; i++) {
-      const pA = randOnSphere(RADIUS);
-      const pB = randOnSphere(RADIUS);
-      posArr[i*6]   = pA.x; posArr[i*6+1] = pA.y; posArr[i*6+2] = pA.z;
-      posArr[i*6+3] = pB.x; posArr[i*6+4] = pB.y; posArr[i*6+5] = pB.z;
-
-      // Random brightness per line — some bright white, most electric cyan, a few deeper blue
-      const r = Math.random();
-      const c = (r < 0.12) ? brightCore : (r < 0.82) ? electricBlue : deepBlue;
-      colArr[i*6]   = c.r; colArr[i*6+1] = c.g; colArr[i*6+2] = c.b;
-      colArr[i*6+3] = c.r; colArr[i*6+4] = c.g; colArr[i*6+5] = c.b;
+    // Fibonacci sphere distribution — evenly spaced points
+    const nodes = [];
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    for (let i = 0; i < NODE_COUNT; i++) {
+      const y = 1 - (i / (NODE_COUNT - 1)) * 2;     // y from 1 to -1
+      const r = Math.sqrt(1 - y * y);
+      const theta = goldenAngle * i;
+      nodes.push(new THREE.Vector3(
+        Math.cos(theta) * r * RADIUS,
+        y * RADIUS,
+        Math.sin(theta) * r * RADIUS,
+      ));
     }
 
-    const lineGeo = new THREE.BufferGeometry();
-    lineGeo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
-    lineGeo.setAttribute('color',    new THREE.BufferAttribute(colArr, 3));
+    // Edges: each node connects to its EDGE_NEIGHBORS nearest neighbors (deduped)
+    const edgeSet = new Set();
+    const edges = [];
+    for (let i = 0; i < nodes.length; i++) {
+      const dists = nodes.map((n, j) => ({ j, d: nodes[i].distanceToSquared(n) }));
+      dists.sort((a, b) => a.d - b.d);
+      for (let k = 1; k <= EDGE_NEIGHBORS; k++) {
+        const j = dists[k].j;
+        const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+        if (!edgeSet.has(key)) {
+          edgeSet.add(key);
+          edges.push([i, j]);
+        }
+      }
+    }
 
-    const lineMat = new THREE.LineBasicMaterial({
+    // Edge geometry
+    const epos = new Float32Array(edges.length * 2 * 3);
+    const ecol = new Float32Array(edges.length * 2 * 3);
+    const electricCyan = new THREE.Color(0x00e5ff);
+    const brightWhite  = new THREE.Color(0xf0ffff);
+    const deepBlue     = new THREE.Color(0x1a5a88);
+    for (let e = 0; e < edges.length; e++) {
+      const [a, b] = edges[e];
+      const na = nodes[a], nb = nodes[b];
+      epos[e*6]   = na.x; epos[e*6+1] = na.y; epos[e*6+2] = na.z;
+      epos[e*6+3] = nb.x; epos[e*6+4] = nb.y; epos[e*6+5] = nb.z;
+      // Random brightness mix per edge
+      const roll = Math.random();
+      const c = (roll < 0.08) ? brightWhite : (roll < 0.85) ? electricCyan : deepBlue;
+      ecol[e*6]   = c.r; ecol[e*6+1] = c.g; ecol[e*6+2] = c.b;
+      ecol[e*6+3] = c.r; ecol[e*6+4] = c.g; ecol[e*6+5] = c.b;
+    }
+    const edgeGeo = new THREE.BufferGeometry();
+    edgeGeo.setAttribute('position', new THREE.BufferAttribute(epos, 3));
+    edgeGeo.setAttribute('color',    new THREE.BufferAttribute(ecol, 3));
+    const edgeMat = new THREE.LineBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.75,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
-      linewidth: 1, // Most platforms cap this at 1; bloom compensates
     });
+    this.edges = new THREE.LineSegments(edgeGeo, edgeMat);
+    scene.add(this.edges);
 
-    this.lines = new THREE.LineSegments(lineGeo, lineMat);
-    scene.add(this.lines);
-
-    // Inner bright core — small glowing sphere at the dead center
-    const innerGeo = new THREE.SphereGeometry(0.05, 24, 24);
-    const innerMat = new THREE.MeshBasicMaterial({
-      color: 0xeaffff,
+    // Add a second pass of longer random chords THROUGH the sphere for the
+    // "data lightning" look — lines that cross the interior, not just surface
+    const CHORD_COUNT = 70;
+    const cpos = new Float32Array(CHORD_COUNT * 2 * 3);
+    for (let i = 0; i < CHORD_COUNT; i++) {
+      const a = nodes[Math.floor(Math.random() * nodes.length)];
+      const b = nodes[Math.floor(Math.random() * nodes.length)];
+      cpos[i*6]   = a.x; cpos[i*6+1] = a.y; cpos[i*6+2] = a.z;
+      cpos[i*6+3] = b.x; cpos[i*6+4] = b.y; cpos[i*6+5] = b.z;
+    }
+    const chordGeo = new THREE.BufferGeometry();
+    chordGeo.setAttribute('position', new THREE.BufferAttribute(cpos, 3));
+    const chordMat = new THREE.LineBasicMaterial({
+      color: 0x33b8e8,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.25,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.chords = new THREE.LineSegments(chordGeo, chordMat);
+    scene.add(this.chords);
+
+    // Node points — bright sprites at each vertex
+    const nodePosArr = new Float32Array(NODE_COUNT * 3);
+    const nodeColArr = new Float32Array(NODE_COUNT * 3);
+    for (let i = 0; i < NODE_COUNT; i++) {
+      nodePosArr[i*3]   = nodes[i].x;
+      nodePosArr[i*3+1] = nodes[i].y;
+      nodePosArr[i*3+2] = nodes[i].z;
+      const roll = Math.random();
+      const c = roll < 0.25 ? brightWhite : electricCyan;
+      nodeColArr[i*3] = c.r; nodeColArr[i*3+1] = c.g; nodeColArr[i*3+2] = c.b;
+    }
+    const nodeGeo = new THREE.BufferGeometry();
+    nodeGeo.setAttribute('position', new THREE.BufferAttribute(nodePosArr, 3));
+    nodeGeo.setAttribute('color',    new THREE.BufferAttribute(nodeColArr, 3));
+
+    // Build node sprite texture
+    const nc = document.createElement('canvas');
+    nc.width = nc.height = 64;
+    const nctx = nc.getContext('2d');
+    const ng = nctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    ng.addColorStop(0,    'rgba(255,255,255,1.0)');
+    ng.addColorStop(0.2,  'rgba(255,255,255,0.85)');
+    ng.addColorStop(0.5,  'rgba(0,229,255,0.45)');
+    ng.addColorStop(1,    'rgba(0,229,255,0.0)');
+    nctx.fillStyle = ng;
+    nctx.fillRect(0, 0, 64, 64);
+
+    const nodeMat = new THREE.PointsMaterial({
+      size: 0.045,
+      map: new THREE.CanvasTexture(nc),
+      vertexColors: true,
+      transparent: true,
+      opacity: 1.0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    this.nodes = new THREE.Points(nodeGeo, nodeMat);
+    scene.add(this.nodes);
+
+    // Bright inner core point — the "consciousness" at dead center
+    const innerGeo = new THREE.SphereGeometry(0.04, 24, 24);
+    const innerMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.95,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
     this.inner = new THREE.Mesh(innerGeo, innerMat);
     scene.add(this.inner);
 
-    // Outer halo — big soft glow via backside sphere
-    const haloGeo = new THREE.SphereGeometry(RADIUS * 1.7, 48, 48);
+    // Outer halo — soft cyan glow
+    const haloGeo = new THREE.SphereGeometry(RADIUS * 1.8, 48, 48);
     const haloMat = new THREE.MeshBasicMaterial({
       color: 0x00c8ff,
       transparent: true,
-      opacity: 0.07,
+      opacity: 0.06,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.BackSide,
@@ -1688,7 +1775,7 @@ class BrainCore {
     this.halo = new THREE.Mesh(haloGeo, haloMat);
     scene.add(this.halo);
 
-    // Ambient cyan light cast from the core
+    // Scene point light to illuminate nearby particles
     this.glowLight = new THREE.PointLight(0x00e5ff, 0.7, 3.5);
     this.glowLight.position.set(0, 0, 0);
     scene.add(this.glowLight);
@@ -1720,28 +1807,37 @@ class BrainCore {
   update(dt, activity) {
     this.time += dt;
 
-    // Electric flicker on the line bundle
-    const flicker = 0.85 + Math.sin(this.time * 4.2) * 0.08 + Math.random() * 0.05;
-    this.lines.material.opacity = flicker * (0.8 + activity * 0.2);
+    // Edge opacity pulse + tiny electric flicker
+    const flicker = 0.82 + Math.sin(this.time * 4.2) * 0.06 + Math.random() * 0.04;
+    this.edges.material.opacity = flicker * (0.7 + activity * 0.25);
 
-    // Inner bright core pulse
+    // Chord lines softer, slower flicker
+    this.chords.material.opacity = (0.18 + activity * 0.2) * (0.8 + Math.sin(this.time * 2.1) * 0.2);
+
+    // Node sprites pulse — when activity spikes they get brighter and bigger
+    this.nodes.material.opacity = 0.9 + Math.sin(this.time * 1.8) * 0.08;
+    this.nodes.material.size = 0.04 + activity * 0.02 + Math.sin(this.time * 1.2) * 0.004;
+
+    // Inner bright core
     const innerPulse = Math.sin(this.time * 1.6) * 0.12 + 0.88;
-    this.inner.material.opacity = innerPulse * (0.85 + activity * 0.15);
-    this.inner.scale.setScalar(1.0 + Math.sin(this.time * 2.1) * 0.12);
+    this.inner.material.opacity = innerPulse * (0.88 + activity * 0.12);
+    this.inner.scale.setScalar(1.0 + Math.sin(this.time * 2.1) * 0.15);
 
-    // Halo pulse + scale breathing
+    // Halo
     const haloPulse = Math.sin(this.time * 1.1) * 0.2 + 0.8;
     this.halo.material.opacity = (0.05 + activity * 0.2) * haloPulse;
-    this.halo.scale.setScalar(1.0 + Math.sin(this.time * 0.75) * 0.1);
+    this.halo.scale.setScalar(1.0 + Math.sin(this.time * 0.75) * 0.08);
 
     this.glowLight.intensity = 0.55 + activity * 0.7 + Math.sin(this.time * 1.7) * 0.12;
 
-    // Multi-axis rotation of the wireframe bundle for depth perception
-    this.lines.rotation.y += dt * 0.25;
-    this.lines.rotation.x += dt * 0.07;
-    this.lines.rotation.z += dt * 0.03;
+    // Slow multi-axis rotation — all layers rotate together, as one orb
+    const rotY = dt * 0.22;
+    const rotX = dt * 0.06;
+    const rotZ = dt * 0.03;
+    this.edges.rotation.y  += rotY;  this.edges.rotation.x  += rotX;  this.edges.rotation.z  += rotZ;
+    this.chords.rotation.y += rotY;  this.chords.rotation.x += rotX;  this.chords.rotation.z += rotZ;
+    this.nodes.rotation.y  += rotY;  this.nodes.rotation.x  += rotX;  this.nodes.rotation.z  += rotZ;
 
-    // Hub lines pulse with activity
     for (const line of this.hubLines) {
       line.material.opacity = 0.1 + activity * 0.25 * haloPulse;
     }
