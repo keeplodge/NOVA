@@ -26,10 +26,13 @@ const HEALTH_URL = `http://${UI_HOST}:${UI_PORT}/health`;
 // Project root = two levels up from electron/ (nova_ui/electron → nova)
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const SERVER_PY    = path.join(PROJECT_ROOT, 'nova_ui_server.py');
+const ASSISTANT_PY = path.join(PROJECT_ROOT, 'nova_assistant.py');
 
-let mainWindow = null;
-let tray       = null;
-let pyProc     = null;
+let mainWindow  = null;
+let tray        = null;
+let pyProc      = null;  // nova_ui_server (dashboard sidecar)
+let assistProc  = null;  // nova_assistant  (voice + scheduler)
+let voiceEnabled = true;
 
 // ── Python server boot ──────────────────────────────────────────────────────
 function findPython() {
@@ -68,6 +71,37 @@ function killPythonServer() {
   if (!pyProc) return;
   try { pyProc.kill(); } catch {}
   pyProc = null;
+}
+
+// ── Voice assistant (nova_assistant.py) ─────────────────────────────────────
+function startAssistant() {
+  if (assistProc) return;
+  const py = findPython();
+  console.log(`[nova-desktop] launching voice assistant ${py} ${ASSISTANT_PY}`);
+  assistProc = spawn(py, [ASSISTANT_PY], {
+    cwd:   PROJECT_ROOT,
+    env:   { ...process.env, NOVA_UI_URL: UI_URL.replace(/\/$/, '') },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  assistProc.stdout.on('data', (b) => process.stdout.write(`[voice] ${b}`));
+  assistProc.stderr.on('data', (b) => process.stderr.write(`[voice] ${b}`));
+  assistProc.on('exit', (code) => {
+    console.warn(`[nova-desktop] voice assistant exited ${code}`);
+    assistProc = null;
+  });
+}
+
+function killAssistant() {
+  if (!assistProc) return;
+  try { assistProc.kill(); } catch {}
+  assistProc = null;
+}
+
+function setVoice(on) {
+  voiceEnabled = !!on;
+  if (voiceEnabled) startAssistant();
+  else killAssistant();
 }
 
 function waitForHealth(maxMs = 30000, intervalMs = 400) {
@@ -138,6 +172,10 @@ function createTray() {
       type:  'checkbox',
       checked: false,
       click: (item) => mainWindow && mainWindow.setAlwaysOnTop(item.checked) },
+    { label: 'Voice (alerts + briefings)',
+      type:  'checkbox',
+      checked: voiceEnabled,
+      click: (item) => setVoice(item.checked) },
     { label: 'Reload',
       click: () => mainWindow && mainWindow.reload() },
     { type: 'separator' },
@@ -171,6 +209,9 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.warn('[nova-desktop]', e.message);
   }
+  // Boot the voice assistant AFTER the sidecar is healthy so its initial
+  // push_log/push_mode calls land on a running server.
+  if (voiceEnabled) startAssistant();
   createWindow();
   createTray();
 });
@@ -180,5 +221,5 @@ app.on('window-all-closed', (e) => {
   if (!app.isQuitting) e.preventDefault?.();
 });
 app.on('before-quit', () => { app.isQuitting = true; });
-app.on('will-quit',   () => killPythonServer());
-process.on('exit',    () => killPythonServer());
+app.on('will-quit',   () => { killAssistant(); killPythonServer(); });
+process.on('exit',    () => { killAssistant(); killPythonServer(); });

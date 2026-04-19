@@ -116,8 +116,18 @@ def speak(text: str):
     """
     Convert text to speech via edge-tts (Microsoft neural, free, no API key).
     Thread-safe: acquires _speak_lock so concurrent calls queue instead of overlap.
+    Also mirrors the spoken line into the browser dashboard chat log + pulses
+    the orb into 'speaking' mode for the duration of playback.
     """
     logger.info(f"[NOVA]: {text}")
+
+    # Mirror to the browser dashboard (fire-and-forget; no-op if UI offline)
+    try:
+        from nova_ui_client import push_log, push_mode
+        push_log("nova", text)
+        push_mode("speaking")
+    except Exception:
+        pass
 
     with _speak_lock:
         if pygame.mixer.music.get_busy():
@@ -148,6 +158,12 @@ def speak(text: str):
                     os.unlink(tmp_path)
                 except Exception:
                     pass
+            # Return orb to idle after the line finishes
+            try:
+                from nova_ui_client import push_mode
+                push_mode("idle")
+            except Exception:
+                pass
 
 
 # ── Voice Input ────────────────────────────────────────────────────────────────
