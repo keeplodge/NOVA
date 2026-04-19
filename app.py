@@ -1,3 +1,4 @@
+import hmac
 import json
 import logging
 import os
@@ -11,6 +12,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
+
+# ── Webhook auth ──────────────────────────────────────────────────────────────
+# Shared secret expected in either the X-Nova-Secret header or a "secret" field
+# in the JSON body. If NOVA_WEBHOOK_SECRET is unset, authentication is skipped
+# but a loud warning is logged on every request so the operator notices.
+NOVA_WEBHOOK_SECRET = os.environ.get("NOVA_WEBHOOK_SECRET", "")
+
+def _webhook_auth_ok(req) -> tuple[bool, str]:
+    if not NOVA_WEBHOOK_SECRET:
+        return True, "(no secret configured — webhook is open; set NOVA_WEBHOOK_SECRET to lock it down)"
+    supplied = req.headers.get("X-Nova-Secret", "")
+    if not supplied:
+        try:
+            body = req.get_json(silent=True) or {}
+            supplied = str(body.get("secret", ""))
+        except Exception:
+            supplied = ""
+    if not supplied:
+        return False, "missing X-Nova-Secret header (or 'secret' field in body)"
+    if not hmac.compare_digest(supplied, NOVA_WEBHOOK_SECRET):
+        return False, "invalid webhook secret"
+    return True, "ok"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL", "")
@@ -378,6 +401,14 @@ def webhook():
     now = datetime.now(tz=EST)
     logger.info(f"Incoming webhook — {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
+    # 0. Auth — shared secret (header or body)
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        logger.warning(f"Webhook auth failed: {reason}")
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    if not NOVA_WEBHOOK_SECRET:
+        logger.warning("⚠ NOVA_WEBHOOK_SECRET is not set — webhook is open to anyone who knows the URL")
+
     # 1. Parse JSON
     try:
         data = request.get_json(force=True, silent=False)
@@ -398,61 +429,82 @@ def webhook():
     # 3. Reset daily state if new day
     reset_daily_state_if_new_day()
 
-    # 4-7. Session / limit / loss gates
-    ticker = data.get("ticker", "").upper().strip()
-    grade  = data.get("grade")
-    ok, reason, gate_state = evaluate_gates(ticker, grade, now)
-    if not ok:
-        logger.warning(reason)
-        return jsonify({"status": "rejected", "message": reason, "gates": gate_state}), 200
+    # 4. Hand off to the Trading Commander — it runs the whole chain:
+    #    enrich → gate → dispatch (TradersPost w/ retry → ManualEscalation)
+    #    → observability (Discord mirror + ledger)
+    commander = _get_commander()
+    result    = commander.handle(data)
 
-    session = gate_state["session"]
-    logger.info(f"Active session: {session}")
+    if result.status == "rejected":
+        return jsonify({
+            "status":  "rejected",
+            "message": result.message,
+            "gates":   result.gates,
+            "signal_id": result.signal_id,
+        }), 200
 
-    # 8. Build clean TradersPost payload and forward
-    tp_payload = build_traderspost_payload(data, session)
-    success, tp_response = forward_to_traderspost(tp_payload)
-    if not success:
-        logger.error(f"Failed to forward signal: {tp_response}")
-        return jsonify({"status": "error", "message": tp_response}), 502
+    if result.status == "error":
+        return jsonify({
+            "status":  "error",
+            "message": result.message,
+            "signal_id": result.signal_id,
+        }), 502
 
-    # 9. Update state
+    # status in ("executed", "escalated") — treat both as successful intake:
+    # "executed" means TP accepted, "escalated" means we queued + pinged Sir.
+    # In both cases, update state as if the trade is live (a queued trade
+    # that Sir taps within 30 min is still a real trade, and we want the
+    # session/day limits to reflect that). If Sir lets it expire, we can
+    # reconcile via /admin/unqueue later.
+    session = result.gates.get("session") or "unknown"
     state["trades_today"] += 1
-    state["session_trades"][session] = gate_state["session_trades"] + 1
+    state["session_trades"][session] = result.gates.get("session_trades", 0) + 1
+    enriched = result.enriched
     state["last_signal"] = {
-        "action":  data["action"],
-        "price":   float(data["price"]),
+        "action":  enriched.action,
+        "price":   enriched.price,
         "session": session,
-        "ticker":  ticker,
-        "sl":      float(data["sl"])    if data.get("sl")    else None,
-        "tp":      float(data["tp"])    if data.get("tp")    else None,
-        "be":      float(data["be"])    if data.get("be")    else None,
-        "grade":   grade,
-        "score":   int(data["score"])   if data.get("score") else None,
-        "sweep":   data.get("sweep"),
+        "ticker":  enriched.ticker,
+        "sl":      enriched.sl,
+        "tp":      enriched.tp,
+        "be":      enriched.be,
+        "grade":   enriched.grade,
+        "score":   enriched.score,
+        "sweep":   enriched.sweep,
         "source":  "webhook",
+        "signal_id": enriched.signal_id,
+        "status":  result.status,
     }
-    state["open_positions"][ticker] = dict(state["last_signal"], opened_at=now.isoformat())
+    state["open_positions"][enriched.ticker] = dict(state["last_signal"], opened_at=now.isoformat())
 
     logger.info(
-        f"Signal forwarded — session: {session} | "
+        f"Signal {result.status} — session: {session} | "
         f"session trades: {state['session_trades'][session]}/{MAX_TRADES_PER_SESSION} | "
         f"day trades: {state['trades_today']}/{MAX_TRADES_PER_DAY} | "
-        f"daily loss: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f}"
+        f"daily loss: ${state['daily_loss']:.2f}/${MAX_DAILY_LOSS:.2f} | "
+        f"chain: {[a.message for a in (result.dispatch.attempts if result.dispatch else [])]}"
     )
 
-    # 10. Log trade to Obsidian
     log_path = log_trade_to_obsidian(data, session, now)
 
-    return jsonify({
-        "status":         "ok",
-        "message":        "Signal accepted and forwarded",
+    response = {
+        "status":         "ok" if result.status == "executed" else result.status,
+        "message":        result.message,
+        "signal_id":      result.signal_id,
         "session":        session,
         "trades_today":   state["trades_today"],
         "session_trades": state["session_trades"][session],
         "daily_loss":     state["daily_loss"],
         "trade_log":      log_path or "failed to write",
-    }), 200
+        "dispatch": {
+            "chosen":   result.dispatch.chosen if result.dispatch else None,
+            "attempts": [
+                {"venue": a.venue, "success": a.success, "message": a.message}
+                for a in (result.dispatch.attempts if result.dispatch else [])
+            ],
+        },
+    }
+    return jsonify(response), 200
 
 
 # ── Manual execution endpoint (Claude / MCP / voice) ─────────────────────────
@@ -841,6 +893,70 @@ def status():
         "open_positions":  state["open_positions"],
         "equity":          build_equity_data(),
     }), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Trading Commander — agent hierarchy (lazy singleton)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_commander = None
+
+def _get_commander():
+    """Lazy-init so importing app.py for tests doesn't boot threads."""
+    global _commander
+    if _commander is None:
+        from nova_trading_agents import TradingCommander
+        _commander = TradingCommander(
+            gate_fn          = evaluate_gates,
+            build_tp_payload = build_traderspost_payload,
+            discord_url      = os.environ.get("NOVA_DISCORD_WEBHOOK_URL", ""),
+        )
+        logger.info("[TradingCommander] initialized — Observability + Dispatcher online")
+    return _commander
+
+
+@app.route("/fire", methods=["GET", "POST"])
+def fire_pending():
+    """
+    One-tap manual fire. Sir receives a Discord DM with a URL like:
+        https://.../fire?token=<16b>&sig=<16b>
+    Tapping it POPs the queued trade off the pending queue and fires
+    TradersPost once. Token expires in 30 minutes; single-use.
+    """
+    token = request.args.get("token") or (request.get_json(silent=True) or {}).get("token", "")
+    sig   = request.args.get("sig")   or (request.get_json(silent=True) or {}).get("sig",   "")
+    if not token or not sig:
+        return jsonify({"ok": False, "status": "invalid", "message": "token and sig required"}), 400
+
+    commander = _get_commander()
+    result    = commander.fire_pending(token, sig)
+    code      = 200 if result.get("ok") else 400
+
+    # Keep the response phone-friendly — minimal HTML so a tap from Discord
+    # shows something readable rather than raw JSON.
+    if "text/html" in (request.headers.get("Accept") or ""):
+        color = "#00C853" if result.get("ok") else "#E53E3E"
+        html  = (
+            f"<html><body style='font-family:system-ui;background:#0A1929;color:#d0d8e8;"
+            f"padding:40px;text-align:center'>"
+            f"<h1 style='color:{color}'>{result.get('status','?').upper()}</h1>"
+            f"<p>{result.get('message','')}</p>"
+            f"<p style='color:#888;font-size:12px'>signal {result.get('signal_id','—')}</p>"
+            f"</body></html>"
+        )
+        return html, code, {"Content-Type": "text/html"}
+    return jsonify(result), code
+
+
+@app.route("/agents/ledger", methods=["GET"])
+def agents_ledger():
+    """Rolling ledger of every commander decision — last 50 by default."""
+    from nova_trading_agents import get_ledger
+    try:
+        limit = min(int(request.args.get("limit", 50)), 200)
+    except Exception:
+        limit = 50
+    return jsonify({"entries": get_ledger(limit)}), 200
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
