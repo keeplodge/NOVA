@@ -76,6 +76,37 @@ except Exception:
     _client = None
     _CLAUDE_ENABLED = False
 
+try:
+    import httpx as _httpx
+    _HTTPX_AVAILABLE = True
+except Exception:
+    _HTTPX_AVAILABLE = False
+
+# Ollama — free local fallback. Uses the same llama3.2:3b model the reflector
+# runs, since Sir already pulled it. Override with NOVA_COMMAND_MODEL env var.
+_OLLAMA_URL      = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+_OLLAMA_MODEL    = os.environ.get("NOVA_COMMAND_MODEL", "llama3.2:3b")
+_OLLAMA_TIMEOUT  = float(os.environ.get("NOVA_COMMAND_OLLAMA_TIMEOUT", "120"))
+
+
+def _ollama_available() -> bool:
+    """Quick health probe — returns True if Ollama is up AND the target model is loaded."""
+    if not _HTTPX_AVAILABLE:
+        return False
+    try:
+        r = _httpx.get(f"{_OLLAMA_URL}/api/tags", timeout=2.0)
+        if r.status_code != 200:
+            return False
+        tags = r.json().get("models", [])
+        names = {m.get("name", "") for m in tags}
+        # Accept exact match OR the base name (llama3.2:3b / llama3.2:3b-text-q4_0 / etc.)
+        return any(name.startswith(_OLLAMA_MODEL.split(":")[0]) for name in names)
+    except Exception:
+        return False
+
+
+_OLLAMA_ENABLED = _ollama_available()
+
 
 ACTIONS = (
     "STATUS", "MORNING_BRIEF", "DEBRIEF", "LEVELS", "PATTERN", "REFLECT",
@@ -145,35 +176,41 @@ Rules:
 # Public entry point
 # ═══════════════════════════════════════════════════════════════════════════
 
-def classify_and_respond(
-    utterance: str,
-    model:     str = "claude-haiku-4-5-20251001",
-    max_tokens: int = 400,
-) -> CommandResponse:
-    """
-    Main entry point. Returns a CommandResponse.
-
-    If Claude/Brain is unavailable, falls back to keyword matching so NOVA is
-    never fully silent.
-    """
-    text = (utterance or "").strip()
-    if not text:
-        return CommandResponse("UNKNOWN", "I didn't catch that, Sir.")
-
-    # Fallback path — if Claude/key is unavailable, use the old keyword matcher
-    if not (_CLAUDE_ENABLED and _client is not None):
-        return _fallback_classifier(text)
-
-    # Build context block from the Brain (always safe — returns "" if offline)
+def _build_user_msg(text: str) -> str:
+    """Context-injected user message. Safe if Brain is offline."""
     ctx = ""
     try:
         ctx = context_block(text, limit=5, include_recent=True,
                             header="RELEVANT MEMORIES FROM THE BRAIN")
     except Exception:
         ctx = ""
+    return f"{ctx}\n\n### UTTERANCE\n{text}\n"
 
-    user_msg = f"{ctx}\n\n### UTTERANCE\n{text}\n"
 
+def _finalize(parsed: dict | None, raw: str, provider: str) -> CommandResponse:
+    """Normalize parsed JSON (or raw fallback) into a CommandResponse."""
+    if not parsed:
+        return CommandResponse(
+            "CHAT",
+            raw[:300] or "Couldn't parse that one, Sir.",
+            reasoning=f"{provider}: json parse failure",
+        )
+    action = parsed.get("action", "UNKNOWN")
+    if action not in ACTIONS:
+        action = "UNKNOWN"
+    return CommandResponse(
+        action=action,          # type: ignore[arg-type]
+        spoken=parsed.get("spoken", "") or "Done, Sir.",
+        payload=parsed.get("payload", "") or "",
+        reasoning=f"{provider} | {parsed.get('reasoning', '')}".strip(" |"),
+    )
+
+
+def _classify_via_claude(text: str, model: str, max_tokens: int) -> CommandResponse | None:
+    """Primary: Claude Haiku 4.5 via the Anthropic SDK."""
+    if not (_CLAUDE_ENABLED and _client is not None):
+        return None
+    user_msg = _build_user_msg(text)
     try:
         resp = _client.messages.create(
             model=model,
@@ -183,20 +220,152 @@ def classify_and_respond(
         )
         raw = resp.content[0].text if resp.content else ""
     except Exception as e:
-        return CommandResponse("CHAT",
+        # Bubble a CHAT response up — caller will decide whether to retry via
+        # Ollama based on whether this is None or a concrete response.
+        return CommandResponse(
+            "CHAT",
+            "Having trouble reaching Claude, Sir.",
+            reasoning=f"claude error: {e}",
+        )
+    return _finalize(_parse_json_response(raw), raw, "claude")
+
+
+_OLLAMA_SYSTEM_PROMPT = """Classify the user's voice command into one action and write a short spoken reply.
+Return ONLY a JSON object:
+{"action":"STATUS|MORNING_BRIEF|DEBRIEF|LEVELS|PATTERN|REFLECT|REMEMBER|RECALL|CHAT|UNKNOWN","spoken":"1 short sentence","payload":"","reasoning":""}
+
+Actions:
+- STATUS: user wants current equity, session, trades today
+- MORNING_BRIEF: run the morning briefing
+- DEBRIEF: run the end-of-day debrief
+- LEVELS: ICT key levels for current session
+- PATTERN: winning setup fingerprint
+- REFLECT: reflect on recent activity
+- REMEMBER: user is dictating something to store (payload = the fact)
+- RECALL: user is asking about something past (payload = search query)
+- CHAT: free-form question
+- UNKNOWN: utterance unclear
+
+Rules: address Sir directly. No emoji. No exclamation marks. Keep spoken under 20 words."""
+
+
+def _classify_via_ollama(text: str, max_tokens: int) -> CommandResponse | None:
+    """
+    Local-first fallback: Ollama chat endpoint with `format=json` for strict
+    JSON output. Uses llama3.2:3b by default — same model the reflector runs,
+    so no additional pulls required.
+
+    We deliberately SKIP the Brain context block here and use a tight,
+    purpose-built system prompt. Ollama's job is intent classification only;
+    the downstream dispatcher (_dispatch_command_action) handles the actual
+    Brain reads/writes. Keeping the input small keeps CPU inference under
+    the voice-command attention budget (~10-30s).
+    """
+    if not (_OLLAMA_ENABLED and _HTTPX_AVAILABLE):
+        return None
+    user_msg = f"### UTTERANCE\n{text}"
+    try:
+        r = _httpx.post(
+            f"{_OLLAMA_URL}/api/chat",
+            json={
+                "model": _OLLAMA_MODEL,
+                "messages": [
+                    {"role": "system", "content": _OLLAMA_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                "format": "json",
+                "stream": False,
+                "options": {
+                    "temperature": 0.2,
+                    "num_predict": 200,
+                },
+            },
+            timeout=_OLLAMA_TIMEOUT,
+        )
+        if r.status_code != 200:
+            _dbg(f"ollama http {r.status_code}: {r.text[:200]}")
+            return None
+        raw = r.json().get("message", {}).get("content", "") or ""
+        if not raw:
+            _dbg("ollama empty message content")
+            return None
+    except Exception as e:
+        _dbg(f"ollama call failed: {type(e).__name__}: {e}")
+        return None
+    return _finalize(_parse_json_response(raw), raw, "ollama")
+
+
+def _dbg(msg: str) -> None:
+    """Visible logger used by both providers — enable with NOVA_CMD_DEBUG=1."""
+    if os.environ.get("NOVA_CMD_DEBUG", "0") == "1":
+        print(f"[nova_command_ai] {msg}", flush=True)
+
+
+def classify_and_respond(
+    utterance: str,
+    model:     str = "claude-haiku-4-5-20251001",
+    max_tokens: int = 400,
+) -> CommandResponse:
+    """
+    Main entry point. Tries providers in order:
+
+        1. Claude Haiku 4.5 (if ANTHROPIC_API_KEY set)
+        2. Ollama local llama3.2:3b (if Ollama daemon running + model pulled)
+        3. Keyword fallback (always works, keeps voice alive)
+
+    Returns a CommandResponse — `response.reasoning` tags which provider
+    actually answered so Brain memories can record provenance.
+    """
+    text = (utterance or "").strip()
+    if not text:
+        return CommandResponse("UNKNOWN", "I didn't catch that, Sir.")
+
+    # 1. Claude
+    cr = _classify_via_claude(text, model=model, max_tokens=max_tokens)
+    if cr is not None:
+        # If Claude returned a proper JSON-backed action, ship it. If it errored
+        # out to a generic "trouble reaching Claude" CHAT, fall through to Ollama.
+        if not cr.reasoning.startswith("claude error"):
+            return cr
+
+    # 2. Ollama local
+    cr2 = _classify_via_ollama(text, max_tokens=max_tokens)
+    if cr2 is not None:
+        return cr2
+
+    # 3. Keyword fallback
+    fb = _fallback_classifier(text)
+    fb.reasoning = f"keyword | {fb.reasoning}".strip(" |")
+    return fb
+
+
+def _legacy_classify(
+    text: str,
+    model: str,
+    max_tokens: int,
+) -> CommandResponse:
+    """Kept for reference — the old Claude-only implementation. Not wired."""
+    try:
+        resp = _client.messages.create(  # type: ignore[union-attr]
+            model=model,
+            max_tokens=max_tokens,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": _build_user_msg(text)}],
+        )
+        raw = resp.content[0].text if resp.content else ""
+    except Exception as e:
+        return CommandResponse(
+            "CHAT",
             "Having trouble reaching my thinking layer, Sir. Try again shortly.",
             reasoning=f"claude error: {e}",
         )
-
     parsed = _parse_json_response(raw)
     if not parsed:
         return CommandResponse("CHAT", raw[:300] or "Couldn't parse that one, Sir.",
                                reasoning="json parse failure")
-
     action = parsed.get("action", "UNKNOWN")
     if action not in ACTIONS:
         action = "UNKNOWN"
-
     return CommandResponse(
         action=action,     # type: ignore[arg-type]
         spoken=parsed.get("spoken", "") or "Done, Sir.",
