@@ -1126,6 +1126,80 @@ def headlines_fire():
     return jsonify({"ok": True, "posted": posted}), 200
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Watchlist Agent — #watchlist Discord relay
+# ═══════════════════════════════════════════════════════════════════════════
+
+_watchlist_started = False
+
+def _start_watchlist_agent_once():
+    global _watchlist_started
+    if _watchlist_started:
+        return
+    _watchlist_started = True
+    try:
+        from nova_watchlist_agent import get_agent as _wl_get
+        agent = _wl_get()
+        agent.start()
+        logger.info("[watchlist-agent] daemon started")
+    except Exception as e:
+        logger.error(f"[watchlist-agent] failed to start: {e}")
+
+
+@app.before_request
+def _boot_watchlist_agent():
+    _start_watchlist_agent_once()
+
+
+@app.route("/watchlist/status", methods=["GET"])
+def watchlist_status():
+    import os as _os
+    from nova_watchlist_agent import get_agent as _wl_get, TICKERS
+    agent   = _wl_get()
+    env_url = _os.environ.get("NOVA_WATCHLIST_DISCORD_WEBHOOK_URL", "")
+    return jsonify({
+        "env_var_set":        bool(env_url),
+        "agent_url_set":      bool(agent.discord_url),
+        "tickers":            [t.display for t in TICKERS],
+        "last_morning":       str(agent._last_morning_date)     if agent._last_morning_date     else None,
+        "last_intraday_hour": agent._last_intraday_hour,
+        "last_eod":           str(agent._last_eod_date)         if agent._last_eod_date         else None,
+        "last_big_moves":     {k: v.isoformat() for k, v in agent._last_big_move_at.items()},
+    }), 200
+
+
+@app.route("/watchlist/morning", methods=["GET", "POST"])
+def watchlist_morning():
+    from nova_watchlist_agent import get_agent as _wl_get
+    agent = _wl_get()
+    agent.maybe_post_morning(force=True)
+    return jsonify({"ok": True, "fired": "morning"}), 200
+
+
+@app.route("/watchlist/intraday", methods=["GET", "POST"])
+def watchlist_intraday():
+    from nova_watchlist_agent import get_agent as _wl_get
+    agent = _wl_get()
+    agent.maybe_post_intraday(force=True)
+    return jsonify({"ok": True, "fired": "intraday"}), 200
+
+
+@app.route("/watchlist/eod", methods=["GET", "POST"])
+def watchlist_eod():
+    from nova_watchlist_agent import get_agent as _wl_get
+    agent = _wl_get()
+    agent.maybe_post_eod(force=True)
+    return jsonify({"ok": True, "fired": "eod"}), 200
+
+
+@app.route("/watchlist/weekend", methods=["GET", "POST"])
+def watchlist_weekend():
+    from nova_watchlist_agent import get_agent as _wl_get
+    agent = _wl_get()
+    agent.maybe_post_weekend(force=True)
+    return jsonify({"ok": True, "fired": "weekend"}), 200
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
