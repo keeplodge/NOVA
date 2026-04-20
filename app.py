@@ -1018,12 +1018,42 @@ def _boot_news_agent():
 
 @app.route("/news/weekly", methods=["POST", "GET"])
 def news_weekly():
-    """Manual trigger — fires the weekly preview embed right now. Useful for
-    testing the pipe end-to-end after setting NOVA_NEWS_DISCORD_WEBHOOK_URL."""
+    """Manual trigger — fires the weekly preview embed right now. Returns the
+    actual post result so we can see if Discord accepted it."""
     from nova_news_agent import get_agent
     agent = get_agent()
-    agent.maybe_post_weekly(force=True)
-    return jsonify({"ok": True, "fired": "weekly"}), 200
+    events = agent.events_for_week(datetime.now(tz=EST))
+    embed  = agent.fmt_weekly(events, datetime.now(tz=EST))
+    posted = agent._post(embed) if embed else False
+    if posted:
+        agent._last_weekly_at = datetime.now(tz=EST)
+    return jsonify({
+        "ok":              posted,
+        "fired":           "weekly",
+        "events_count":    len(events),
+        "discord_url_set": bool(agent.discord_url),
+        "discord_url_len": len(agent.discord_url or ""),
+        "embed_built":     bool(embed),
+    }), 200
+
+
+@app.route("/news/status", methods=["GET"])
+def news_status():
+    """Diagnostic — what does the news agent actually see?"""
+    import os as _os
+    from nova_news_agent import get_agent
+    agent = get_agent()
+    env_url = _os.environ.get("NOVA_NEWS_DISCORD_WEBHOOK_URL", "")
+    return jsonify({
+        "agent_discord_url_set":    bool(agent.discord_url),
+        "agent_discord_url_len":    len(agent.discord_url or ""),
+        "env_var_set":              bool(env_url),
+        "env_var_len":              len(env_url),
+        "env_var_starts_with":      env_url[:40] if env_url else "",
+        "last_weekly_at":           agent._last_weekly_at.isoformat() if agent._last_weekly_at else None,
+        "last_daily_at":            agent._last_daily_at.isoformat() if agent._last_daily_at else None,
+        "events_cached":            len(agent._events_cache),
+    }), 200
 
 
 @app.route("/news/daily", methods=["POST", "GET"])
