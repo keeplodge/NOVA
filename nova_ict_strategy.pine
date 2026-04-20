@@ -1,49 +1,78 @@
 //@version=5
-strategy("NOVA ICT - London and NY AM", shorttitle="NOVA ICT", overlay=true,
+// ═════════════════════════════════════════════════════════════════════════════
+// NOVA ICT v11 — London and NY AM (NQ 15m)
+//
+// RISK MODEL (baked in)
+//   • RISK per trade  = $500   (dynamic qty: contracts = floor($500 / stop$))
+//   • TP (target)     = $1500  (3R — risk × 3)
+//   • BREAKEVEN       = at +1R (stop moves from sweep-extreme to entry price)
+//   • TRAILING STOP   = active after BE; stop trails 1R behind current close
+//                       — locks in +1R once price reaches +2R, +2R at +3R, etc.
+//   • SESSION CLOSE   = flat all positions at London 05:00 ET / NY AM 11:00 ET
+//
+// ENTRY = sweep (PDH/PDL/AR/Swing) → MSS → FVG or OB armed, during London/NY AM
+// ═════════════════════════════════════════════════════════════════════════════
+strategy("NOVA ICT v11 - London and NY AM", shorttitle="NOVA v11", overlay=true,
          default_qty_type=strategy.fixed, default_qty_value=1,
          initial_capital=50000, calc_on_every_tick=true,
-         process_orders_on_close=false, max_boxes_count=500)
+         process_orders_on_close=false, max_boxes_count=500,
+         pyramiding=0)
 
-// Inputs
+// ─── Inputs ──────────────────────────────────────────────────────────────────
 i_london = input.session("0200-0500", "London Session", group="Sessions")
 i_ny     = input.session("0830-1100", "NY AM Session",  group="Sessions")
 i_asia   = input.session("1900-0000", "Asian Range",    group="Sessions")
+i_trade_asia = input.bool(true, "Trade Asia session", tooltip="Backtest 2026-04-20: +90 trades/6mo, Sharpe 0.54→0.69. Watch live slippage.", group="Sessions")
 i_tz     = "America/New_York"
-i_swing  = input.int(5,   "Swing Length",               minval=2, maxval=20, group="Structure")
-i_bpd    = input.int(96,  "Prior-session bars (24hr)",  minval=48, maxval=1440, tooltip="96 = 24hr on 15m. Captures fresh liquidity pool from the prior session. Was 288 (3-day rolling) prior to 2026-04-18.", group="Structure")
+
+i_swing  = input.int(5,   "Swing Length",              minval=2, maxval=20, group="Structure")
+i_bpd    = input.int(96,  "Prior-session bars (24hr)", minval=48, maxval=1440, group="Structure")
 i_buf    = input.float(2.0, "SL Buffer (pts)", minval=0.5, step=0.5,  group="Structure")
-i_rr     = input.float(2.0, "Target R:R",      minval=1.0, step=0.5,  group="Structure")
-i_be     = input.float(1.0, "BE at (R)",       minval=0.5, step=0.25, group="Structure")
-i_sfvg   = input.bool(true, "Show FVGs",   group="Display")
-i_ssw    = input.bool(true, "Show Sweeps", group="Display")
-i_sgrd   = input.bool(true, "Show Grader", group="Display")
+i_arm    = input.int(10,  "Array arm window (bars)",   minval=3, maxval=30, group="Structure")
 
-// Webhook auth — set this in the indicator settings dialog (not in source).
-// Pine's confirm=true prompt forces Sir to enter it the first time the
-// strategy is added to a chart. Source stays clean; the value is stored in
-// TradingView's per-chart settings and injected into every alert payload
-// as "secret".
-i_secret = input.string("", "Webhook Secret", confirm=true, group="Webhook")
+// Risk model — $500 SL, $1500 TP, BE at 1R, trailing after BE.
+i_risk_usd = input.float(500,  "SL — Risk per trade ($)",      minval=50,  step=50, group="Risk Model")
+i_tp_usd   = input.float(1500, "TP — Target per trade ($)",    minval=100, step=100, tooltip="3R at $500 risk. Change to adjust R multiple.", group="Risk Model")
+i_be_r     = input.float(1.0,  "BE trigger (R multiple)",      minval=0.5, step=0.25, tooltip="Stop moves to entry when price reaches this R.", group="Risk Model")
+i_trail    = input.bool(true,  "Trailing stop active after BE", tooltip="Stop trails 1R behind close once BE is reached.", group="Risk Model")
 
-// Sessions
+i_ptval    = input.float(20,   "Point value ($/pt)",  minval=0.01, step=1, tooltip="NQ=20, MNQ=2, ES=50, MES=5, XAUUSD=100", group="Risk Model")
+i_maxsl    = input.float(500,  "Max stop distance (pts)", minval=5, step=5, tooltip="Skip setups whose stop distance exceeds this.", group="Risk Model")
+i_maxqty   = input.int(2,      "Max contracts per trade", minval=1, maxval=20, tooltip="Hard cap on position size regardless of dynamic sizing math.", group="Risk Model")
+
+i_htf    = input.timeframe("D", "HTF Bias Timeframe", options=["60", "240", "D", "W"], group="HTF Bias (label only)")
+i_htflen = input.int(9, "HTF Bias EMA Length", minval=3, maxval=50, group="HTF Bias (label only)")
+i_gatemode = input.string("Off", "Gate mode", options=["Off", "A+ and A-", "A+ only"], group="HTF Bias (label only)")
+
+i_sfvg   = input.bool(true, "Show FVGs",         group="Display")
+i_ssw    = input.bool(true, "Show Sweeps",       group="Display")
+i_sob    = input.bool(true, "Show Order Blocks", group="Display")
+i_sgrd   = input.bool(true, "Show Grader",       group="Display")
+
+i_secret = input.string("", "Webhook Secret", group="Webhook")
+
+// ─── Sessions ────────────────────────────────────────────────────────────────
 in_lon = not na(time(timeframe.period, i_london, i_tz))
 in_ny  = not na(time(timeframe.period, i_ny,  i_tz))
 in_asi = not na(time(timeframe.period, i_asia, i_tz))
-in_ses = in_lon or in_ny
-ses_lbl = in_lon ? "London" : in_ny ? "NY_AM" : "-"
+in_ses = in_lon or in_ny or (i_trade_asia and in_asi)
+ses_lbl = in_lon ? "London" : in_ny ? "NY_AM" : (i_trade_asia and in_asi) ? "Asia" : "-"
 lon_open = in_lon and not in_lon[1]
 lon_end  = not in_lon and in_lon[1]
 ny_end   = not in_ny and in_ny[1]
-ses_end  = (lon_end or ny_end) and strategy.position_size != 0
+asi_end  = i_trade_asia and not in_asi and in_asi[1]
+ses_end  = (lon_end or ny_end or asi_end) and strategy.position_size != 0
 
-// Previous day high/low (24-hr rolling window — fresh liquidity pool)
+// ─── Prior-day range ────────────────────────────────────────────────────────
+phigh = ta.highest(high, i_bpd)[1]
+plow  = ta.lowest(low,  i_bpd)[1]
 var float pdh = na
 var float pdl = na
 if ta.change(time("D")) != 0
-    pdh := ta.highest(high, i_bpd)[1]
-    pdl := ta.lowest(low, i_bpd)[1]
+    pdh := phigh
+    pdl := plow
 
-// Asian range
+// ─── Asian range ─────────────────────────────────────────────────────────────
 var float asi_h = na
 var float asi_l = na
 var float ar_h  = na
@@ -57,7 +86,7 @@ if lon_open
     asi_h := na
     asi_l := na
 
-// Swing pivots
+// ─── Swing pivots ────────────────────────────────────────────────────────────
 ph = ta.pivothigh(high, i_swing, i_swing)
 pl = ta.pivotlow(low, i_swing, i_swing)
 var float lph = na
@@ -67,12 +96,12 @@ if not na(ph)
 if not na(pl)
     lpl := pl
 
-// Liquidity sweeps
+// ─── Sweeps ──────────────────────────────────────────────────────────────────
 sw_bull = in_ses and ((not na(lpl) and low < lpl and close > lpl) or (not na(pdl) and low < pdl and close > pdl) or (not na(ar_l) and low < ar_l and close > ar_l))
 sw_bear = in_ses and ((not na(lph) and high > lph and close < lph) or (not na(pdh) and high > pdh and close < pdh) or (not na(ar_h) and high > ar_h and close < ar_h))
 
-var float  sw_lo     = na
-var float  sw_hi     = na
+var float  sw_lo      = na
+var float  sw_hi      = na
 var string sweep_type = "Swing"
 
 if sw_bull
@@ -82,7 +111,7 @@ if sw_bear
     sw_hi      := high
     sweep_type := not na(pdh) and high > pdh ? "PDH" : not na(ar_h) and high > ar_h ? "AR_High" : "Swing_High"
 
-// MSS - break of structure after sweep
+// ─── MSS ─────────────────────────────────────────────────────────────────────
 var int bull_bar = 0
 var int bear_bar = 0
 if sw_bull
@@ -93,121 +122,184 @@ if sw_bear
 bull_mss = bar_index - bull_bar <= 30 and not na(lph) and close > lph and not na(sw_lo)
 bear_mss = bar_index - bear_bar <= 30 and not na(lpl) and close < lpl and not na(sw_hi)
 
-// FVG - persistent state, active for 10 bars
-var bool  bfvg_active = false
-var float bfvg_hi     = na
-var float bfvg_lo     = na
-var bool  sfvg_active = false
-var float sfvg_hi     = na
-var float sfvg_lo     = na
+// ─── FVG ─────────────────────────────────────────────────────────────────────
+var bool bfvg_active = false
+var bool sfvg_active = false
+var int  bfvg_bar    = 0
+var int  sfvg_bar    = 0
 
 bfok_cur = low > high[2] and (low - high[2]) / close >= 0.0005
 sfok_cur = high < low[2] and (low[2] - high) / close >= 0.0005
 
 if bfok_cur
     bfvg_active := true
-    bfvg_hi     := low
-    bfvg_lo     := high[2]
+    bfvg_bar    := bar_index
 if sfok_cur
     sfvg_active := true
-    sfvg_hi     := low[2]
-    sfvg_lo     := high
+    sfvg_bar    := bar_index
+if bar_index - bfvg_bar > i_arm
+    bfvg_active := false
+if bar_index - sfvg_bar > i_arm
+    sfvg_active := false
 
-// Entry signals
-long_sig  = in_ses and bull_mss and bfvg_active and strategy.position_size == 0
-short_sig = in_ses and bear_mss and sfvg_active and strategy.position_size == 0
+// ─── Order Blocks ────────────────────────────────────────────────────────────
+var float bob_hi  = na
+var float bob_lo  = na
+var int   bob_bar = 0
+var float sob_hi  = na
+var float sob_lo  = na
+var int   sob_bar = 0
+
+if close < open
+    bob_hi  := high
+    bob_lo  := low
+    bob_bar := bar_index
+if close > open
+    sob_hi  := high
+    sob_lo  := low
+    sob_bar := bar_index
+
+bob_active = not na(bob_hi) and bar_index - bob_bar <= i_arm
+sob_active = not na(sob_hi) and bar_index - sob_bar <= i_arm
+
+// ─── HTF bias (label only — data showed filtering hurts edge) ───────────────
+htf_close = request.security(syminfo.tickerid, i_htf, close[1],                   lookahead=barmerge.lookahead_off)
+htf_ema   = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_htflen)[1], lookahead=barmerge.lookahead_off)
+htf_bull  = not na(htf_close) and not na(htf_ema) and htf_close > htf_ema
+htf_bear  = not na(htf_close) and not na(htf_ema) and htf_close < htf_ema
+
+// ─── Entry signals ───────────────────────────────────────────────────────────
+long_arr  = bfvg_active or bob_active
+short_arr = sfvg_active or sob_active
+
+long_sig  = in_ses and bull_mss and long_arr  and strategy.position_size == 0
+short_sig = in_ses and bear_mss and short_arr and strategy.position_size == 0
 
 if long_sig
     bfvg_active := false
 if short_sig
     sfvg_active := false
 
-// Reset FVG after 10 bars
-var int bfvg_bar = 0
-var int sfvg_bar = 0
-if bfok_cur
-    bfvg_bar := bar_index
-if sfok_cur
-    sfvg_bar := bar_index
-if bar_index - bfvg_bar > 10
-    bfvg_active := false
-if bar_index - sfvg_bar > 10
-    sfvg_active := false
-
-// Trade Grader — fixed 2026-04-18: FVG check now reads the *active* flag
-// (so the armed-FVG still counts at entry bar), not the FVG-forming-bar flag
-// which is only true for a single bar.
-var table gt = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 50), border_width=1)
+// ─── Grader (5 × 2 = 10) ─────────────────────────────────────────────────────
+var table gt = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 50), border_width=1)
 var int    gs = 0
-var string gl = "C"
+var string gl = "D"
 
 if long_sig or short_sig
     sc = 0
     sc := not na(sw_lo) or not na(sw_hi) ? sc + 2 : sc
-    sc := bull_mss or bear_mss ? sc + 2 : sc
-    sc := bfvg_active or sfvg_active ? sc + 2 : sc
-    sc := in_ses ? sc + 2 : sc
+    sc := bull_mss or bear_mss            ? sc + 2 : sc
+    sc := long_arr or short_arr           ? sc + 2 : sc
+    sc := in_ses                          ? sc + 2 : sc
+    htf_ok = (long_sig and htf_bull) or (short_sig and htf_bear)
+    sc := htf_ok                          ? sc + 2 : sc
     gs := sc
-    gl := sc >= 8 ? "A+" : sc >= 6 ? "A" : sc >= 4 ? "B" : "C"
+    gl := sc >= 10 ? "A+" : sc >= 8 ? "A-" : sc >= 6 ? "B" : sc >= 4 ? "C" : "D"
 
-gc = gl == "A+" ? color.lime : gl == "A" ? color.green : gl == "B" ? color.orange : color.red
+gc = gl == "A+" ? color.lime : gl == "A-" ? color.green : gl == "B" ? color.orange : gl == "C" ? color.red : color.gray
 
-// Trade management
-var float esl = na
-var float etp = na
-var float ebe = na
+exec_allowed = i_gatemode == "Off" ? (gl != "D") : i_gatemode == "A+ only" ? (gl == "A+") : (gl == "A+" or gl == "A-")
 
-if long_sig
-    dist  = close - (sw_lo - i_buf)
-    esl  := sw_lo - i_buf
-    etp  := close + dist * i_rr
-    ebe  := close + dist * i_be
-    strategy.entry("Long", strategy.long)
-    alert('{"ticker":"' + syminfo.ticker + '","action":"buy","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"FVG_LONG","secret":"' + i_secret + '"}', alert.freq_once_per_bar)
+// ─── Trade management — $500 risk, $1500 TP, BE at 1R, trailing ─────────────
+var float esl  = na   // active stop level
+var float etp  = na   // take-profit level ($1500 / 3R)
+var float ebe  = na   // BE trigger price (+1R from entry)
+var float entry_px = na
+var float r_dist = na  // 1R in points (= stop distance)
+var int   last_qty = 0
+var bool  last_skipped_risk = false
 
-if short_sig
-    dist  = (sw_hi + i_buf) - close
-    esl  := sw_hi + i_buf
-    etp  := close - dist * i_rr
-    ebe  := close - dist * i_be
-    strategy.entry("Short", strategy.short)
-    alert('{"ticker":"' + syminfo.ticker + '","action":"sell","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"FVG_SHORT","secret":"' + i_secret + '"}', alert.freq_once_per_bar)
+long_comment  = bfvg_active and bob_active ? "FVG+OB_LONG"  : bfvg_active ? "FVG_LONG"  : "OB_LONG"
+short_comment = sfvg_active and sob_active ? "FVG+OB_SHORT" : sfvg_active ? "FVG_SHORT" : "OB_SHORT"
 
+// TP multiple derived from $1500 / $500 = 3R (dynamic if Sir changes inputs)
+tp_r = i_tp_usd / i_risk_usd
+
+if long_sig and exec_allowed
+    dist = close - (sw_lo - i_buf)                           // stop distance in points
+    risk_valid = dist > 0 and dist <= i_maxsl
+    qty = risk_valid ? math.min(i_maxqty, math.max(1, int(math.floor(i_risk_usd / (dist * i_ptval))))) : 0
+    last_qty := qty
+    last_skipped_risk := not risk_valid
+    if qty > 0
+        entry_px := close
+        r_dist   := dist
+        esl      := sw_lo - i_buf                            // SL = sweep low − buffer  (= -$500)
+        etp      := close + dist * tp_r                      // TP = entry + 3R           (= +$1500)
+        ebe      := close + dist * i_be_r                    // BE trigger at +1R
+        strategy.entry("Long", strategy.long, qty=qty)
+        alert('{"ticker":"' + syminfo.ticker + '","action":"buy","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"qty":' + str.tostring(qty) + ',"risk_usd":' + str.tostring(i_risk_usd) + ',"tp_usd":' + str.tostring(i_tp_usd) + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"' + long_comment + '","secret":"' + i_secret + '"}', alert.freq_once_per_bar)
+
+if short_sig and exec_allowed
+    dist = (sw_hi + i_buf) - close
+    risk_valid = dist > 0 and dist <= i_maxsl
+    qty = risk_valid ? math.min(i_maxqty, math.max(1, int(math.floor(i_risk_usd / (dist * i_ptval))))) : 0
+    last_qty := qty
+    last_skipped_risk := not risk_valid
+    if qty > 0
+        entry_px := close
+        r_dist   := dist
+        esl      := sw_hi + i_buf
+        etp      := close - dist * tp_r
+        ebe      := close - dist * i_be_r
+        strategy.entry("Short", strategy.short, qty=qty)
+        alert('{"ticker":"' + syminfo.ticker + '","action":"sell","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(esl, "#.00") + ',"tp":' + str.tostring(etp, "#.00") + ',"be":' + str.tostring(ebe, "#.00") + ',"qty":' + str.tostring(qty) + ',"risk_usd":' + str.tostring(i_risk_usd) + ',"tp_usd":' + str.tostring(i_tp_usd) + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"' + short_comment + '","secret":"' + i_secret + '"}', alert.freq_once_per_bar)
+
+// ─── BE + TRAILING STOP management ───────────────────────────────────────────
 if strategy.position_size > 0
-    if close >= ebe
-        esl := strategy.position_avg_price
-    strategy.exit("LX", "Long", stop=esl, limit=etp)
+    // Step 1: once price reaches +1R, move SL to entry (BE)
+    if close >= ebe and not na(entry_px)
+        esl := math.max(esl, entry_px)
+    // Step 2: after BE is reached, trail SL 1R behind close (continuous)
+    if i_trail and close >= ebe and not na(r_dist)
+        trail_sl = close - r_dist
+        esl := math.max(esl, trail_sl)
+    strategy.exit("X", "Long", stop=esl, limit=etp)
 
 if strategy.position_size < 0
-    if close <= ebe
-        esl := strategy.position_avg_price
-    strategy.exit("SX", "Short", stop=esl, limit=etp)
+    if close <= ebe and not na(entry_px)
+        esl := math.min(esl, entry_px)
+    if i_trail and close <= ebe and not na(r_dist)
+        trail_sl = close + r_dist
+        esl := math.min(esl, trail_sl)
+    strategy.exit("X", "Short", stop=esl, limit=etp)
 
 if ses_end
     strategy.close_all(comment="Session Close")
-    esl := na
-    etp := na
-    ebe := na
+    esl  := na
+    etp  := na
+    ebe  := na
+    entry_px := na
+    r_dist   := na
 
-// Grader display
+// ─── Grader display ──────────────────────────────────────────────────────────
+htf_lbl   = htf_bull ? "BULL" : htf_bear ? "BEAR" : "-"
+htf_color = htf_bull ? color.lime : htf_bear ? color.red : color.gray
+
 if i_sgrd
-    table.cell(gt, 0, 0, "NOVA GRADER",    text_color=color.white,  bgcolor=color.navy, text_size=size.small)
-    table.cell(gt, 1, 0, "",               text_color=color.white,  bgcolor=color.navy)
-    table.cell(gt, 0, 1, "Grade",          text_color=color.gray,   text_size=size.small)
-    table.cell(gt, 1, 1, gl,               text_color=gc,           text_size=size.large)
-    table.cell(gt, 0, 2, "Score",          text_color=color.gray,   text_size=size.small)
-    table.cell(gt, 1, 2, str.tostring(gs) + "/10", text_color=color.white, text_size=size.small)
-    table.cell(gt, 0, 3, "Session",        text_color=color.gray,   text_size=size.small)
-    table.cell(gt, 1, 3, ses_lbl,          text_color=color.yellow, text_size=size.small)
-    table.cell(gt, 0, 4, "Side",           text_color=color.gray,   text_size=size.small)
-    table.cell(gt, 1, 4, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "-", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
+    table.cell(gt, 0, 0, "NOVA GRADER v11", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(gt, 1, 0, i_gatemode,         text_color=color.aqua,  bgcolor=color.navy, text_size=size.tiny)
+    table.cell(gt, 0, 1, "Risk / TP",       text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 1, "$" + str.tostring(i_risk_usd, "#") + " / $" + str.tostring(i_tp_usd, "#"), text_color=color.aqua, text_size=size.small)
+    table.cell(gt, 0, 2, "Grade",           text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 2, gl,                text_color=gc,          text_size=size.large)
+    table.cell(gt, 0, 3, "Score",           text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 3, str.tostring(gs) + "/10", text_color=color.white, text_size=size.small)
+    table.cell(gt, 0, 4, "Session",         text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 4, ses_lbl,           text_color=color.yellow, text_size=size.small)
+    table.cell(gt, 0, 5, "HTF Bias",        text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 5, htf_lbl,           text_color=htf_color,   text_size=size.small)
+    table.cell(gt, 0, 6, "Last Qty",        text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 6, last_skipped_risk ? "SKIP" : str.tostring(last_qty), text_color=last_skipped_risk ? color.red : color.white, text_size=size.small)
+    table.cell(gt, 0, 7, "Side",            text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 7, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "-", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
 
-// Visuals
+// ─── Visuals ─────────────────────────────────────────────────────────────────
 bgcolor(in_lon ? color.new(color.blue,  95) : na, title="London BG")
 bgcolor(in_ny  ? color.new(color.green, 95) : na, title="NY AM BG")
 
-plot(not na(pdh) ? pdh : na, "PDH", color.new(color.orange, 40), 1)
-plot(not na(pdl) ? pdl : na, "PDL", color.new(color.orange, 40), 1)
+plot(not na(pdh) ? pdh : na, "PDH",       color.new(color.orange, 40), 1)
+plot(not na(pdl) ? pdl : na, "PDL",       color.new(color.orange, 40), 1)
 plot(not na(ar_h) ? ar_h : na, "AR High", color.new(color.purple, 50), 1)
 plot(not na(ar_l) ? ar_l : na, "AR Low",  color.new(color.purple, 50), 1)
 
@@ -221,9 +313,14 @@ if i_sfvg and bfok_cur
 if i_sfvg and sfok_cur
     box.new(bar_index, high, bar_index + 30, low[2], border_color=color.new(color.red, 60), bgcolor=color.new(color.red, 88), border_width=1, text="FVG", text_color=color.new(color.red, 20), text_size=size.tiny)
 
+if i_sob and bull_mss and not na(bob_hi)
+    box.new(bob_bar, bob_hi, bar_index + 30, bob_lo, border_color=color.new(color.teal, 40), bgcolor=color.new(color.teal, 85), border_width=1, text="BULL OB", text_color=color.new(color.teal, 20), text_size=size.tiny)
+if i_sob and bear_mss and not na(sob_hi)
+    box.new(sob_bar, sob_hi, bar_index + 30, sob_lo, border_color=color.new(color.maroon, 40), bgcolor=color.new(color.maroon, 85), border_width=1, text="BEAR OB", text_color=color.new(color.maroon, 20), text_size=size.tiny)
+
 plotshape(long_sig,  "Long Entry",  shape.arrowup,   location.belowbar, color.lime, size=size.normal)
 plotshape(short_sig, "Short Entry", shape.arrowdown, location.abovebar, color.red,  size=size.normal)
 
-plot(strategy.position_size != 0 and not na(esl) ? esl : na, "SL", color.new(color.red,    20), 1, plot.style_linebr)
-plot(strategy.position_size != 0 and not na(etp) ? etp : na, "TP", color.new(color.lime,   20), 1, plot.style_linebr)
-plot(strategy.position_size != 0 and not na(ebe) ? ebe : na, "BE", color.new(color.yellow, 40), 1, plot.style_linebr)
+plot(strategy.position_size != 0 and not na(esl) ? esl : na, "SL (trailing)", color.new(color.red,    20), 1, plot.style_linebr)
+plot(strategy.position_size != 0 and not na(etp) ? etp : na, "TP $1500",     color.new(color.lime,   20), 1, plot.style_linebr)
+plot(strategy.position_size != 0 and not na(ebe) ? ebe : na, "BE @ 1R",      color.new(color.yellow, 40), 1, plot.style_linebr)

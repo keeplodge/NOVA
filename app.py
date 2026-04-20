@@ -37,12 +37,14 @@ def _webhook_auth_ok(req) -> tuple[bool, str]:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL", "")
-MAX_TRADES_PER_DAY      = 3   # 1 London + 2 NY AM
+MAX_TRADES_PER_DAY      = 5   # 1 Asia + 1 London + 2 NY AM (+1 buffer)
 
 # Per-session caps — asymmetric. London is a confirmation window, NY AM is
 # where liquidity + displacement stack up so we allow a second shot if the
-# first closes or gets stopped mid-session.
+# first closes or gets stopped mid-session. Asia added 2026-04-20 after
+# backtest showed +28% Sharpe; capped tight due to thin liquidity / spread risk.
 SESSION_TRADE_CAPS = {
+    "Asia":   1,
     "London": 1,
     "NY_AM":  2,
 }
@@ -94,10 +96,10 @@ def build_equity_data() -> list[dict]:
     return result
 
 # ── Session windows (EST) ─────────────────────────────────────────────────────
-# NOVA trades ONLY NQ futures, London + NY AM. Asia session and weekend crypto
-# are permanently removed — Sir's ICT edge is proven on NQ 15m during these
-# two windows only. See feedback memory "Trading scope".
+# NOVA trades NQ futures: Asia (post-backtest add 2026-04-20) + London + NY AM.
+# Weekend crypto remains permanently off.
 SESSIONS = {
+    "Asia":   {"start": (19, 0),  "end": (24, 0)},  # 7pm-midnight ET (1900-0000)
     "London": {"start": (2,  0),  "end": (5,  0)},
     "NY_AM":  {"start": (8, 30),  "end": (11, 0)},
 }
