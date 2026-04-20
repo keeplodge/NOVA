@@ -45,60 +45,79 @@ class BiasAgent:
         self._last_post_date = None
 
     # ── Market data fetch ───────────────────────────────────────────────
+    def _safe_float(self, v) -> float | None:
+        """Flatten pandas Series/scalar to float, None on failure."""
+        try:
+            if hasattr(v, "iloc"):
+                v = v.iloc[0]
+            return float(v)
+        except Exception:
+            return None
+
     def _fetch_levels(self) -> dict:
-        """Pulls NQ daily + intraday, VIX, DXY, 10Y. Returns a context dict."""
+        """Pulls NQ daily + intraday, VIX, DXY, 10Y. Uses yf.Ticker (per-symbol)
+        which is more Railway-network-friendly than yf.download (bulk)."""
         yf = _get_yf()
         out: dict = {}
-        try:
-            # Daily bars for PDH/PDL
-            nq_daily = yf.download("NQ=F", period="5d", interval="1d", progress=False, auto_adjust=False)
-            if len(nq_daily) >= 2:
-                prev = nq_daily.iloc[-2]
-                out["pdh"]          = float(prev["High"].iloc[0]) if hasattr(prev["High"], 'iloc') else float(prev["High"])
-                out["pdl"]          = float(prev["Low"].iloc[0])  if hasattr(prev["Low"], 'iloc')  else float(prev["Low"])
-                out["prev_close"]   = float(prev["Close"].iloc[0]) if hasattr(prev["Close"], 'iloc') else float(prev["Close"])
-                # Typical price proxy for VWAP
-                out["prior_typ"]    = (out["pdh"] + out["pdl"] + out["prev_close"]) / 3
-        except Exception as ex:
-            logger.warning(f"NQ daily fetch failed: {ex}")
+        errors: list[str] = []
 
+        # 1. NQ daily for PDH / PDL / prev_close
         try:
-            # Intraday for Asian range + current NQ
-            nq_intra = yf.download("NQ=F", period="2d", interval="15m", progress=False, auto_adjust=False)
-            if len(nq_intra) > 0:
-                out["nq_price"] = float(nq_intra["Close"].iloc[-1].iloc[0] if hasattr(nq_intra["Close"].iloc[-1], 'iloc') else nq_intra["Close"].iloc[-1])
-                # Asian range: 19:00 EST prev day → 00:00 EST today
+            nq = yf.Ticker("NQ=F").history(period="5d", interval="1d", auto_adjust=False)
+            if len(nq) >= 2:
+                prev = nq.iloc[-2]
+                out["pdh"]        = self._safe_float(prev["High"])
+                out["pdl"]        = self._safe_float(prev["Low"])
+                out["prev_close"] = self._safe_float(prev["Close"])
+                if all(out.get(k) for k in ("pdh", "pdl", "prev_close")):
+                    out["prior_typ"] = (out["pdh"] + out["pdl"] + out["prev_close"]) / 3
+        except Exception as ex:
+            errors.append(f"NQ daily: {ex}")
+
+        # 2. NQ intraday for current price + Asian range
+        try:
+            nq_i = yf.Ticker("NQ=F").history(period="2d", interval="15m", auto_adjust=False)
+            if len(nq_i) > 0:
+                out["nq_price"] = self._safe_float(nq_i["Close"].iloc[-1])
                 today   = datetime.now(tz=EST).replace(hour=0, minute=0, second=0, microsecond=0)
-                asia_s  = today - timedelta(hours=5)   # yesterday 19:00
-                asia_e  = today                         # today 00:00
-                idx     = nq_intra.index
-                # yfinance returns UTC-indexed timestamps — convert
+                asia_s  = today - timedelta(hours=5)
+                asia_e  = today
+                idx     = nq_i.index
                 try:
-                    mask = (idx >= asia_s) & (idx < asia_e)
+                    # Index may be tz-aware or naive; make the comparison work either way
+                    if hasattr(idx, "tz") and idx.tz is not None:
+                        asia_s_cmp = asia_s.astimezone(idx.tz)
+                        asia_e_cmp = asia_e.astimezone(idx.tz)
+                    else:
+                        asia_s_cmp = asia_s.replace(tzinfo=None)
+                        asia_e_cmp = asia_e.replace(tzinfo=None)
+                    mask = (idx >= asia_s_cmp) & (idx < asia_e_cmp)
                     if mask.any():
-                        asi = nq_intra.loc[mask]
-                        out["asian_high"] = float(asi["High"].max().iloc[0] if hasattr(asi["High"].max(), 'iloc') else asi["High"].max())
-                        out["asian_low"]  = float(asi["Low"].min().iloc[0]  if hasattr(asi["Low"].min(), 'iloc')  else asi["Low"].min())
-                except Exception:
-                    pass
+                        asi = nq_i.loc[mask]
+                        out["asian_high"] = self._safe_float(asi["High"].max())
+                        out["asian_low"]  = self._safe_float(asi["Low"].min())
+                except Exception as ex:
+                    errors.append(f"asian range: {ex}")
         except Exception as ex:
-            logger.warning(f"NQ intraday fetch failed: {ex}")
+            errors.append(f"NQ intraday: {ex}")
 
-        # Macro context: VIX / DXY / 10Y
-        # DX-Y.NYB is ICE dollar index (more reliable than DX=F which
-        # yfinance sometimes returns "delisted" errors for)
+        # 3. Macro: VIX / DXY / 10Y
         for sym, key in [("^VIX", "vix"), ("DX-Y.NYB", "dxy"), ("^TNX", "tnx")]:
             try:
-                d = yf.download(sym, period="3d", interval="1d", progress=False, auto_adjust=False)
+                d = yf.Ticker(sym).history(period="3d", interval="1d", auto_adjust=False)
                 if len(d) >= 2:
-                    c = d["Close"]
-                    cur = float(c.iloc[-1].iloc[0] if hasattr(c.iloc[-1], 'iloc') else c.iloc[-1])
-                    prev = float(c.iloc[-2].iloc[0] if hasattr(c.iloc[-2], 'iloc') else c.iloc[-2])
-                    out[key]         = cur
-                    out[f"{key}_pct"] = (cur - prev) / prev * 100 if prev else 0.0
+                    cur  = self._safe_float(d["Close"].iloc[-1])
+                    prev = self._safe_float(d["Close"].iloc[-2])
+                    if cur is not None:
+                        out[key] = cur
+                    if cur is not None and prev:
+                        out[f"{key}_pct"] = (cur - prev) / prev * 100
             except Exception as ex:
-                logger.warning(f"{sym} fetch failed: {ex}")
+                errors.append(f"{sym}: {ex}")
 
+        if errors:
+            logger.warning(f"bias fetch errors: {errors[:3]}")
+        out["_errors"] = errors  # expose for /bias/fire diagnostic
         return out
 
     # ── Bias scoring ────────────────────────────────────────────────────

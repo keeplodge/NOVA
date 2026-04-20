@@ -1260,8 +1260,11 @@ def bias_fire():
     from nova_bias_agent import get_agent as _bias_get
     agent = _bias_get()
     ctx   = agent._fetch_levels()
+    errors = ctx.pop("_errors", []) if ctx else []
+    # We now post even with partial data — bias agent gracefully handles missing fields
+    keys = sorted(ctx.keys()) if ctx else []
     if not ctx:
-        return jsonify({"ok": False, "reason": "no market data"}), 200
+        return jsonify({"ok": False, "reason": "no market data", "errors": errors[:5]}), 200
     bias  = agent.compute_bias(ctx)
     embed = agent.fmt_embed(ctx, bias)
     posted = agent._post(embed)
@@ -1271,7 +1274,8 @@ def bias_fire():
         "ok":       posted,
         "bias":     bias["bias"],
         "strength": bias["strength"],
-        "ctx_keys": sorted(ctx.keys()),
+        "ctx_keys": keys,
+        "errors":   errors[:5],
     }), 200
 
 
