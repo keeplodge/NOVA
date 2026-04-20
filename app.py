@@ -1074,6 +1074,58 @@ def news_scan():
     return jsonify({"ok": True, "fired": "scan"}), 200
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Headlines Agent — #live-headlines Discord relay
+# ═══════════════════════════════════════════════════════════════════════════
+
+_headlines_started = False
+
+def _start_headlines_agent_once():
+    global _headlines_started
+    if _headlines_started:
+        return
+    _headlines_started = True
+    try:
+        from nova_headlines_agent import get_agent as _hl_get
+        agent = _hl_get()
+        agent.start()
+        logger.info("[headlines-agent] daemon started")
+    except Exception as e:
+        logger.error(f"[headlines-agent] failed to start: {e}")
+
+
+@app.before_request
+def _boot_headlines_agent():
+    _start_headlines_agent_once()
+
+
+@app.route("/headlines/status", methods=["GET"])
+def headlines_status():
+    import os as _os
+    from nova_headlines_agent import get_agent as _hl_get, SOURCES
+    agent   = _hl_get()
+    env_url = _os.environ.get("NOVA_HEADLINES_DISCORD_WEBHOOK_URL", "")
+    return jsonify({
+        "agent_discord_url_set": bool(agent.discord_url),
+        "env_var_set":           bool(env_url),
+        "sources":               [s.name for s in SOURCES],
+        "seen_counts":           {name: len(q) for name, q in agent._seen_per_source.items()},
+        "first_cycle":           agent._first_cycle,
+        "poll_live_s":           agent.poll_live,
+        "poll_quiet_s":          agent.poll_quiet,
+        "max_per_cycle":         agent.max_per_cycle,
+    }), 200
+
+
+@app.route("/headlines/fire", methods=["GET", "POST"])
+def headlines_fire():
+    """Manual trigger — runs one polling cycle and force-posts fresh items."""
+    from nova_headlines_agent import get_agent as _hl_get
+    agent  = _hl_get()
+    posted = agent.tick(force_post=True)
+    return jsonify({"ok": True, "posted": posted}), 200
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
