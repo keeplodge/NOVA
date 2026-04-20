@@ -44,10 +44,45 @@ class BiasAgent:
         self._thread       = None
         self._last_post_date = None
 
-    # ── Market data fetch ───────────────────────────────────────────────
+    # ── Market data fetch (direct Yahoo HTTP, avoids yfinance rate-limit) ──
+    _YAHOO_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+    def _yahoo_chart(self, symbol: str, interval: str, range_: str, retries: int = 2) -> dict | None:
+        """Direct hit to Yahoo's v8 chart JSON. Returns parsed data or None."""
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        for attempt in range(retries + 1):
+            try:
+                r = requests.get(url, params={"interval": interval, "range": range_},
+                                 headers={"User-Agent": self._YAHOO_UA, "Accept": "application/json"},
+                                 timeout=8)
+                if r.status_code == 429:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                r.raise_for_status()
+                j = r.json()
+                result = j.get("chart", {}).get("result", [{}])[0]
+                if not result:
+                    return None
+                ts = result.get("timestamp", [])
+                q  = result.get("indicators", {}).get("quote", [{}])[0]
+                return {
+                    "timestamps": ts,
+                    "open":       q.get("open", []),
+                    "high":       q.get("high", []),
+                    "low":        q.get("low", []),
+                    "close":      q.get("close", []),
+                    "volume":     q.get("volume", []),
+                    "currency":   result.get("meta", {}).get("currency"),
+                }
+            except Exception as ex:
+                if attempt == retries:
+                    raise
+                time.sleep(1.5)
+        return None
+
     def _safe_float(self, v) -> float | None:
-        """Flatten pandas Series/scalar to float, None on failure."""
         try:
+            if v is None: return None
             if hasattr(v, "iloc"):
                 v = v.iloc[0]
             return float(v)
@@ -55,69 +90,72 @@ class BiasAgent:
             return None
 
     def _fetch_levels(self) -> dict:
-        """Pulls NQ daily + intraday, VIX, DXY, 10Y. Uses yf.Ticker (per-symbol)
-        which is more Railway-network-friendly than yf.download (bulk)."""
-        yf = _get_yf()
+        """
+        Pulls NQ daily + intraday, VIX, DXY, 10Y via direct Yahoo chart JSON.
+        Railway's yfinance client gets 429'd aggressively; bypassing the
+        wrapper with a real browser UA + spaced requests usually works.
+        """
         out: dict = {}
         errors: list[str] = []
 
-        # 1. NQ daily for PDH / PDL / prev_close
+        # 1. NQ daily
         try:
-            nq = yf.Ticker("NQ=F").history(period="5d", interval="1d", auto_adjust=False)
-            if len(nq) >= 2:
-                prev = nq.iloc[-2]
-                out["pdh"]        = self._safe_float(prev["High"])
-                out["pdl"]        = self._safe_float(prev["Low"])
-                out["prev_close"] = self._safe_float(prev["Close"])
-                if all(out.get(k) for k in ("pdh", "pdl", "prev_close")):
-                    out["prior_typ"] = (out["pdh"] + out["pdl"] + out["prev_close"]) / 3
+            d = self._yahoo_chart("NQ=F", "1d", "5d")
+            if d and len(d["close"]) >= 2:
+                # Take last two non-null bars
+                closes = [c for c in d["close"] if c is not None]
+                highs  = [h for h in d["high"]  if h is not None]
+                lows   = [l for l in d["low"]   if l is not None]
+                if len(closes) >= 2 and len(highs) >= 2 and len(lows) >= 2:
+                    out["pdh"]        = float(highs[-2])
+                    out["pdl"]        = float(lows[-2])
+                    out["prev_close"] = float(closes[-2])
+                    out["prior_typ"]  = (out["pdh"] + out["pdl"] + out["prev_close"]) / 3
         except Exception as ex:
             errors.append(f"NQ daily: {ex}")
 
-        # 2. NQ intraday for current price + Asian range
+        time.sleep(1.0)  # spacing to avoid rate-limiter
+
+        # 2. NQ intraday — current price + Asian range
         try:
-            nq_i = yf.Ticker("NQ=F").history(period="2d", interval="15m", auto_adjust=False)
-            if len(nq_i) > 0:
-                out["nq_price"] = self._safe_float(nq_i["Close"].iloc[-1])
-                today   = datetime.now(tz=EST).replace(hour=0, minute=0, second=0, microsecond=0)
-                asia_s  = today - timedelta(hours=5)
-                asia_e  = today
-                idx     = nq_i.index
-                try:
-                    # Index may be tz-aware or naive; make the comparison work either way
-                    if hasattr(idx, "tz") and idx.tz is not None:
-                        asia_s_cmp = asia_s.astimezone(idx.tz)
-                        asia_e_cmp = asia_e.astimezone(idx.tz)
-                    else:
-                        asia_s_cmp = asia_s.replace(tzinfo=None)
-                        asia_e_cmp = asia_e.replace(tzinfo=None)
-                    mask = (idx >= asia_s_cmp) & (idx < asia_e_cmp)
-                    if mask.any():
-                        asi = nq_i.loc[mask]
-                        out["asian_high"] = self._safe_float(asi["High"].max())
-                        out["asian_low"]  = self._safe_float(asi["Low"].min())
-                except Exception as ex:
-                    errors.append(f"asian range: {ex}")
+            d = self._yahoo_chart("NQ=F", "15m", "2d")
+            if d and d["timestamps"]:
+                # Most recent non-null close = current NQ
+                for c in reversed(d["close"]):
+                    if c is not None:
+                        out["nq_price"] = float(c)
+                        break
+                # Asian range: 19:00 EST yesterday → 00:00 EST today (unix UTC)
+                today = datetime.now(tz=EST).replace(hour=0, minute=0, second=0, microsecond=0)
+                asia_s = (today - timedelta(hours=5)).timestamp()
+                asia_e = today.timestamp()
+                h_vals, l_vals = [], []
+                for i, t in enumerate(d["timestamps"]):
+                    if asia_s <= t < asia_e:
+                        if d["high"][i] is not None: h_vals.append(d["high"][i])
+                        if d["low"][i]  is not None: l_vals.append(d["low"][i])
+                if h_vals: out["asian_high"] = float(max(h_vals))
+                if l_vals: out["asian_low"]  = float(min(l_vals))
         except Exception as ex:
             errors.append(f"NQ intraday: {ex}")
 
-        # 3. Macro: VIX / DXY / 10Y
+        # 3. Macro — VIX / DXY / 10Y, spaced 1s apart
         for sym, key in [("^VIX", "vix"), ("DX-Y.NYB", "dxy"), ("^TNX", "tnx")]:
+            time.sleep(1.0)
             try:
-                d = yf.Ticker(sym).history(period="3d", interval="1d", auto_adjust=False)
-                if len(d) >= 2:
-                    cur  = self._safe_float(d["Close"].iloc[-1])
-                    prev = self._safe_float(d["Close"].iloc[-2])
-                    if cur is not None:
-                        out[key] = cur
-                    if cur is not None and prev:
-                        out[f"{key}_pct"] = (cur - prev) / prev * 100
+                d = self._yahoo_chart(sym, "1d", "5d")
+                if d:
+                    closes = [c for c in d["close"] if c is not None]
+                    if len(closes) >= 2:
+                        cur, prev = float(closes[-1]), float(closes[-2])
+                        out[key]          = cur
+                        out[f"{key}_pct"] = (cur - prev) / prev * 100 if prev else 0.0
             except Exception as ex:
                 errors.append(f"{sym}: {ex}")
 
         if errors:
             logger.warning(f"bias fetch errors: {errors[:3]}")
-        out["_errors"] = errors  # expose for /bias/fire diagnostic
+        out["_errors"] = errors
         return out
 
     # ── Bias scoring ────────────────────────────────────────────────────
