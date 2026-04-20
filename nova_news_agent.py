@@ -337,37 +337,19 @@ class NewsAgent:
 
     # ── Daemon loop ──────────────────────────────────────────────────────
     def _loop(self):
-        # Kickstart: fire one weekly preview on first boot so the community
-        # gets Sunday-night value even if we deploy mid-week.
-        try:
-            self.maybe_post_weekly(force=True)
-        except Exception as e:
-            logger.error(f"kickstart weekly failed: {e}")
-
+        """
+        Simplified — Sir wants ONE post per day for the economic calendar.
+        Only fires the daily menu at 07:00 EST Mon-Fri. No kickstart, no
+        weekly preview, no pre-alerts, no post-results.
+        """
         while not self._stop.is_set():
             try:
                 now = datetime.now(tz=EST)
-
-                # Sunday 18:00 EST → weekly preview
-                if now.weekday() == 6 and now.hour == 18 and now.minute < 5:
-                    self.maybe_post_weekly()
-
-                # Mon-Fri 07:00 EST → daily menu
+                # The ONLY post: daily menu Mon-Fri at 07:00 EST
                 if now.weekday() < 5 and now.hour == 7 and now.minute < 5:
                     self.maybe_post_daily()
-
-                # Every tick (5 min) during Mon-Fri 06-17 EST → scan
-                if now.weekday() < 5 and 6 <= now.hour <= 17:
-                    self.scan_pre_and_post()
-
-                # Daily rollover housekeeping: clear dedup maps on new day
-                if now.hour == 0 and now.minute < 5:
-                    self._fired_pre.clear()
-                    self._fired_post.clear()
-
             except Exception as e:
                 logger.exception(f"news agent tick error: {e}")
-
             # Sleep 60s — schedule granularity
             self._stop.wait(60)
 

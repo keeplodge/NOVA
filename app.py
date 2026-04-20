@@ -1168,36 +1168,54 @@ def watchlist_status():
     }), 200
 
 
-@app.route("/watchlist/morning", methods=["GET", "POST"])
-def watchlist_morning():
+def _watchlist_run(kind: str):
+    """Shared helper: run a fire, return a detailed result for debugging."""
     from nova_watchlist_agent import get_agent as _wl_get
     agent = _wl_get()
-    agent.maybe_post_morning(force=True)
-    return jsonify({"ok": True, "fired": "morning"}), 200
+    quotes = agent._fetch_quotes()
+    if not quotes:
+        return jsonify({
+            "ok": False, "kind": kind, "reason": "yfinance fetch returned zero quotes",
+            "url_set": bool(agent.discord_url),
+        }), 200
+    if kind == "morning":
+        embed = agent.fmt_morning(quotes)
+    elif kind == "intraday":
+        embed = agent.fmt_intraday(quotes)
+    elif kind == "eod":
+        embed = agent.fmt_eod(quotes)
+    elif kind == "weekend":
+        embed = agent.fmt_weekend_crypto(quotes)
+    else:
+        return jsonify({"ok": False, "kind": kind, "reason": "unknown kind"}), 400
+    posted = agent._post(embed) if embed else False
+    return jsonify({
+        "ok":         posted,
+        "kind":       kind,
+        "quotes":     len(quotes),
+        "url_set":    bool(agent.discord_url),
+        "embed_built": bool(embed),
+    }), 200
+
+
+@app.route("/watchlist/morning", methods=["GET", "POST"])
+def watchlist_morning():
+    return _watchlist_run("morning")
 
 
 @app.route("/watchlist/intraday", methods=["GET", "POST"])
 def watchlist_intraday():
-    from nova_watchlist_agent import get_agent as _wl_get
-    agent = _wl_get()
-    agent.maybe_post_intraday(force=True)
-    return jsonify({"ok": True, "fired": "intraday"}), 200
+    return _watchlist_run("intraday")
 
 
 @app.route("/watchlist/eod", methods=["GET", "POST"])
 def watchlist_eod():
-    from nova_watchlist_agent import get_agent as _wl_get
-    agent = _wl_get()
-    agent.maybe_post_eod(force=True)
-    return jsonify({"ok": True, "fired": "eod"}), 200
+    return _watchlist_run("eod")
 
 
 @app.route("/watchlist/weekend", methods=["GET", "POST"])
 def watchlist_weekend():
-    from nova_watchlist_agent import get_agent as _wl_get
-    agent = _wl_get()
-    agent.maybe_post_weekend(force=True)
-    return jsonify({"ok": True, "fired": "weekend"}), 200
+    return _watchlist_run("weekend")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

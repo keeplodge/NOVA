@@ -452,10 +452,9 @@ class Observability:
         logger.info(f"[Observability] signal received id={enriched.signal_id}")
 
     def signal_rejected(self, enriched: EnrichedSignal, gate: GateResult):
+        # Log-only. Rejected signals aren't actionable for the community —
+        # they clutter the channel. Keep the ledger entry for /agents/ledger.
         self._append_ledger("signal_rejected", enriched, {"reason": gate.reason, "gates": gate.gate_state})
-        embed = self._base_embed(enriched, color=0xFFB020, title="⛔ Signal rejected")
-        embed["description"] = gate.reason
-        self._post_discord(embed)
 
     def signal_executed(self, enriched: EnrichedSignal, dispatch: DispatchResult):
         self._append_ledger("signal_executed", enriched, {"chosen": dispatch.chosen})
@@ -613,18 +612,27 @@ class HeartbeatAgent:
             self_ok,    self_msg    = self._probe_self()
             near_expiry             = self._check_pending_queue()
 
-            # Log transitions — only noisy if a channel just broke or recovered
-            if self._last_tp_ok is not None and self._last_tp_ok != tp_ok:
+            # Log transitions to ledger only. Discord stays silent unless TP
+            # goes DOWN for real (critical; worth a ping). Recoveries and
+            # routine OKs stay out of the channel.
+            if self._last_tp_ok is True and tp_ok is False:
+                # Actual degradation — alert
+                self.obs._append_ledger(
+                    "heartbeat_tp_transition", None,
+                    {"from": True, "to": False, "msg": tp_msg},
+                )
+                embed = {
+                    "title": "🫀 TradersPost DOWN ❗",
+                    "color": 0xE53E3E,
+                    "description": tp_msg,
+                }
+                self.obs._post_discord(embed)
+            elif self._last_tp_ok is not None and self._last_tp_ok != tp_ok:
+                # Log-only (e.g., recovery)
                 self.obs._append_ledger(
                     "heartbeat_tp_transition", None,
                     {"from": self._last_tp_ok, "to": tp_ok, "msg": tp_msg},
                 )
-                embed = {
-                    "title": "🫀 TradersPost " + ("RECOVERED ✅" if tp_ok else "DOWN ❗"),
-                    "color": 0x00C853 if tp_ok else 0xE53E3E,
-                    "description": tp_msg,
-                }
-                self.obs._post_discord(embed)
             self._last_tp_ok = tp_ok
 
             if self._last_discord_ok is not None and self._last_discord_ok != disc_ok:
