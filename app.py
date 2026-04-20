@@ -989,6 +989,61 @@ def agents_ledger():
     return jsonify({"entries": get_ledger(limit)}), 200
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# News Agent — #economic-calendar Discord relay
+# ═══════════════════════════════════════════════════════════════════════════
+
+_news_started = False
+
+def _start_news_agent_once():
+    """Start the news daemon exactly once, on first request. Flask 3.x has
+    no before_first_request hook, so we gate on a module-level flag."""
+    global _news_started
+    if _news_started:
+        return
+    _news_started = True
+    try:
+        from nova_news_agent import get_agent
+        agent = get_agent()
+        agent.start()
+        logger.info("[news-agent] daemon started")
+    except Exception as e:
+        logger.error(f"[news-agent] failed to start: {e}")
+
+
+@app.before_request
+def _boot_news_agent():
+    _start_news_agent_once()
+
+
+@app.route("/news/weekly", methods=["POST", "GET"])
+def news_weekly():
+    """Manual trigger — fires the weekly preview embed right now. Useful for
+    testing the pipe end-to-end after setting NOVA_NEWS_DISCORD_WEBHOOK_URL."""
+    from nova_news_agent import get_agent
+    agent = get_agent()
+    agent.maybe_post_weekly(force=True)
+    return jsonify({"ok": True, "fired": "weekly"}), 200
+
+
+@app.route("/news/daily", methods=["POST", "GET"])
+def news_daily():
+    """Manual trigger — fires today's daily menu embed."""
+    from nova_news_agent import get_agent
+    agent = get_agent()
+    agent.maybe_post_daily(force=True)
+    return jsonify({"ok": True, "fired": "daily"}), 200
+
+
+@app.route("/news/scan", methods=["POST", "GET"])
+def news_scan():
+    """Manual trigger — runs one pre/post scan cycle."""
+    from nova_news_agent import get_agent
+    agent = get_agent()
+    agent.scan_pre_and_post()
+    return jsonify({"ok": True, "fired": "scan"}), 200
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
