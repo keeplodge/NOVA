@@ -1218,6 +1218,63 @@ def watchlist_weekend():
     return _watchlist_run("weekend")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Daily Bias Agent — #daily-bias Discord relay
+# ═══════════════════════════════════════════════════════════════════════════
+
+_bias_started = False
+
+def _start_bias_agent_once():
+    global _bias_started
+    if _bias_started:
+        return
+    _bias_started = True
+    try:
+        from nova_bias_agent import get_agent as _bias_get
+        _bias_get().start()
+        logger.info("[bias-agent] daemon started")
+    except Exception as e:
+        logger.error(f"[bias-agent] failed to start: {e}")
+
+
+@app.before_request
+def _boot_bias_agent():
+    _start_bias_agent_once()
+
+
+@app.route("/bias/status", methods=["GET"])
+def bias_status():
+    import os as _os
+    from nova_bias_agent import get_agent as _bias_get
+    agent   = _bias_get()
+    env_url = _os.environ.get("NOVA_BIAS_DISCORD_WEBHOOK_URL", "")
+    return jsonify({
+        "env_var_set":    bool(env_url),
+        "agent_url_set":  bool(agent.discord_url),
+        "last_post_date": str(agent._last_post_date) if agent._last_post_date else None,
+    }), 200
+
+
+@app.route("/bias/fire", methods=["GET", "POST"])
+def bias_fire():
+    from nova_bias_agent import get_agent as _bias_get
+    agent = _bias_get()
+    ctx   = agent._fetch_levels()
+    if not ctx:
+        return jsonify({"ok": False, "reason": "no market data"}), 200
+    bias  = agent.compute_bias(ctx)
+    embed = agent.fmt_embed(ctx, bias)
+    posted = agent._post(embed)
+    if posted:
+        agent._last_post_date = datetime.now(tz=EST).date()
+    return jsonify({
+        "ok":       posted,
+        "bias":     bias["bias"],
+        "strength": bias["strength"],
+        "ctx_keys": sorted(ctx.keys()),
+    }), 200
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
