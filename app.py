@@ -515,7 +515,10 @@ def webhook():
         f"chain: {[a.message for a in (result.dispatch.attempts if result.dispatch else [])]}"
     )
 
-    log_path = log_trade_to_obsidian(data, session, now)
+    # Trade is now in /agents/ledger as signal_executed. The desktop-side
+    # TradeMemorializer (nova_assistant.py) polls the ledger and writes the
+    # trade into the Neural Brain as a memory. Railway's filesystem isn't
+    # Sir's Obsidian vault so we don't bother with local file logging here.
 
     response = {
         "status":         "ok" if result.status == "executed" else result.status,
@@ -525,7 +528,6 @@ def webhook():
         "trades_today":   state["trades_today"],
         "session_trades": state["session_trades"][session],
         "daily_loss":     state["daily_loss"],
-        "trade_log":      log_path or "failed to write",
         "dispatch": {
             "chosen":   result.dispatch.chosen if result.dispatch else None,
             "attempts": [

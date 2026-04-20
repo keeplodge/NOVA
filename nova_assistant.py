@@ -1238,6 +1238,15 @@ def main():
     except Exception as _e:
         logger.warning(f"Drift monitor failed to start: {_e}")
 
+    # Trade memorializer — bridges Railway /agents/ledger → local Neural Brain
+    # Every executed trade becomes a brain memory (category=trading)
+    try:
+        from nova_trade_memorializer import get_agent as _tm_get
+        _tm_get().start()
+        logger.info("Trade memorializer armed — Railway → Brain bridge active.")
+    except Exception as _e:
+        logger.warning(f"Trade memorializer failed to start: {_e}")
+
     listen_for_wake_word()
 
 
