@@ -126,10 +126,20 @@ class NewsAgent:
                 out.append(e)
         return sorted(out, key=lambda e: self.parse_event_time(e))
 
+    def _week_window(self, when: datetime) -> tuple[datetime, datetime]:
+        """
+        Return (week_start, week_end) for the week we want to preview.
+        - Sunday → upcoming week (Mon tomorrow through Sun next)
+        - Mon-Sat → current week (this Monday through Sunday)
+        """
+        if when.weekday() == 6:  # Sunday → preview upcoming week
+            week_start = (when + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            week_start = (when - timedelta(days=when.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        return week_start, week_start + timedelta(days=7)
+
     def events_for_week(self, when: datetime) -> list[dict]:
-        week_start = when - timedelta(days=when.weekday())           # Mon 00:00
-        week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_end   = week_start + timedelta(days=7)
+        week_start, week_end = self._week_window(when)
         out = []
         for e in self.filter_usd_high(self.fetch_events()):
             t = self.parse_event_time(e)
@@ -187,8 +197,7 @@ class NewsAgent:
         }
 
     def fmt_weekly(self, events: list[dict], week_anchor: datetime) -> dict | None:
-        week_start = week_anchor - timedelta(days=week_anchor.weekday())
-        week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start, week_end = self._week_window(week_anchor)
         header = f"{week_start.strftime('%b %d')} – {(week_start + timedelta(days=6)).strftime('%b %d, %Y')}"
         by_day: dict[str, list[tuple[datetime, dict]]] = {}
         for e in events:
