@@ -185,15 +185,34 @@ def build_traderspost_payload(data: dict, session: str) -> dict:
 
     sentiment_map = {"buy": "bullish", "sell": "bearish"}
 
+    # Pine emits 'qty'; /execute callers sometimes send 'quantity'. Accept both.
+    qty_raw = data.get("qty") if data.get("qty") is not None else data.get("quantity", 1)
+
     payload = {
         "ticker":    data["ticker"].upper().strip(),
         "action":    data["action"],
         "price":     float(data["price"]),
-        "quantity":  int(data.get("quantity", 1)),
+        "quantity":  int(qty_raw or 1),
         "orderType": data.get("orderType", "market"),
         "sentiment": sentiment_map[data["action"]],
         "comment":   comment,
     }
+
+    # Bracket attachments — TradersPost expects nested stopLoss/takeProfit
+    # objects. Pine's alert JSON sends flat 'sl'/'tp' fields; translate here so
+    # every forwarded order carries its exit orders.
+    sl = data.get("sl")
+    tp = data.get("tp")
+    if sl is not None:
+        try:
+            payload["stopLoss"]   = {"type": "stop",   "stopPrice":  float(sl)}
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid sl value ignored: {sl!r}")
+    if tp is not None:
+        try:
+            payload["takeProfit"] = {"limitPrice": float(tp)}
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid tp value ignored: {tp!r}")
 
     logger.info(f"TradersPost payload: {json.dumps(payload)}")
     return payload
