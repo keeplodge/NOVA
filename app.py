@@ -159,6 +159,47 @@ def get_current_session(now: datetime) -> str | None:
     return None
 
 
+def expire_stale_positions(now: datetime) -> list[dict]:
+    """
+    Defensive state scrub: pop any `open_positions` entry whose session is no
+    longer the active session. The Pine strategy closes every position flat at
+    session-end; if Railway didn't receive an explicit /close, the tracker
+    lingers and blocks the next signal (happened 2026-04-22 03:43 — Asia trade
+    ghost blocked a London signal). This helper prevents the re-occurrence by
+    inspecting each stored position's session metadata and expiring anything
+    that shouldn't still be open.
+
+    Called at the top of evaluate_gates() on every signal. Returns a list of
+    expired records for logging/observability.
+
+    Entries created before the session metadata existed (legacy, `session`
+    missing on the stored dict) are left alone — /close or a restart clears
+    those.
+    """
+    current_session = get_current_session(now)
+    expired: list[dict] = []
+    for ticker, pos in list(state["open_positions"].items()):
+        opened_session = pos.get("session")
+        if not opened_session:
+            continue  # legacy entry — leave alone, operator can /close manually
+        if opened_session == current_session:
+            continue  # still in the session that opened the position — keep
+
+        expired.append({
+            "ticker": ticker,
+            "opened_session": opened_session,
+            "current_session": current_session,
+            "opened_at": pos.get("opened_at"),
+        })
+        state["open_positions"].pop(ticker, None)
+        logger.warning(
+            f"[expire_stale_positions] popped {ticker} — opened in "
+            f"{opened_session}, current session is {current_session or 'None'}"
+        )
+
+    return expired
+
+
 def validate_payload(data: dict) -> tuple[bool, str]:
     for field in ("ticker", "action", "price"):
         if field not in data:
@@ -403,6 +444,13 @@ def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool,
       - Sessions:   London (02:00-05:00 EST) + NY AM (08:30-11:00 EST) ONLY
       - Weekends:   all futures trading rejected
     """
+    # Defense #2 — scrub any open_positions entries whose session has ended
+    # before we check the open_position gate. Prevents ghost state from
+    # blocking legitimate signals in a fresh session (observed 2026-04-22).
+    stale = expire_stale_positions(now)
+    if stale:
+        logger.info(f"[evaluate_gates] expired {len(stale)} stale position(s): {stale}")
+
     norm       = _normalize_ticker(ticker)
     is_allowed = norm in ALLOWED_TICKERS
     is_weekend = now.weekday() >= 5
