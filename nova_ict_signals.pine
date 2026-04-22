@@ -1,0 +1,243 @@
+//@version=5
+// NOVA ICT SIGNALS — Multi-timeframe signal-only indicator
+// Signal-only port of v11. No orders. Fires alerts tagged with timeframe.
+// Designed for 1m / 5m / 15m / 1h / 4h / D charts. Does not touch v11 exec.
+indicator("NOVA ICT Signals (multi-TF)", shorttitle="NOVA SIGNALS", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+i_london = input.session("0200-0500", "London Session", group="Sessions")
+i_ny     = input.session("0830-1100", "NY AM Session",  group="Sessions")
+i_asia   = input.session("1900-0000", "Asian Range",    group="Sessions")
+i_tz     = "America/New_York"
+i_gate_sessions = input.bool(true, "Gate signals by session windows", tooltip="ON for intraday (15m/1h/4h). OFF for daily/weekly scans.", group="Sessions")
+
+i_swing  = input.int(5,   "Swing Length",              minval=2, maxval=20, group="Structure")
+i_bpd    = input.int(96,  "Prior-session bars",        minval=48, maxval=1440, group="Structure")
+i_buf    = input.float(2.0, "SL Buffer (pts)", minval=0.5, step=0.5,  group="Structure")
+i_arm    = input.int(10,  "Array arm window (bars)",   minval=3, maxval=30, group="Structure")
+i_fvg_min = input.float(0.0005, "FVG min size (% price)", minval=0.0001, step=0.0001, group="Structure")
+
+i_risk_usd = input.float(500,  "Displayed risk per trade ($)",    minval=50,  step=50, group="Display Risk")
+i_tp_usd   = input.float(1500, "Displayed target per trade ($)",  minval=100, step=100, group="Display Risk")
+i_ptval    = input.float(20,   "Point value ($/pt)", tooltip="NQ=20, MNQ=2, ES=50, MES=5, XAUUSD=100", group="Display Risk")
+
+i_htf      = input.timeframe("D", "HTF Bias Timeframe", options=["60", "240", "D", "W"], group="HTF Bias")
+i_htflen   = input.int(9, "HTF Bias EMA Length", minval=3, maxval=50, group="HTF Bias")
+i_gatemode = input.string("Off", "Gate mode", options=["Off", "A+ and A-", "A+ only"], group="HTF Bias")
+
+i_sfvg   = input.bool(true, "Show FVGs",         group="Display")
+i_ssw    = input.bool(true, "Show Sweeps",       group="Display")
+i_sob    = input.bool(true, "Show Order Blocks", group="Display")
+i_sgrd   = input.bool(true, "Show Grader",       group="Display")
+
+i_source  = input.string("NOVA ICT signals", "Source tag (in alert payload)", group="Webhook")
+i_secret  = input.string("", "Webhook Secret", group="Webhook")
+
+// ─── Sessions ────────────────────────────────────────────────────────────────
+in_lon = not na(time(timeframe.period, i_london, i_tz))
+in_ny  = not na(time(timeframe.period, i_ny,  i_tz))
+in_asi = not na(time(timeframe.period, i_asia, i_tz))
+in_ses_raw = in_lon or in_ny or in_asi
+in_ses = i_gate_sessions ? in_ses_raw : true
+ses_lbl = in_lon ? "London" : in_ny ? "NY_AM" : in_asi ? "Asia" : "Any"
+
+// ─── Prior-day range ────────────────────────────────────────────────────────
+phigh = ta.highest(high, i_bpd)[1]
+plow  = ta.lowest(low,  i_bpd)[1]
+var float pdh = na
+var float pdl = na
+if ta.change(time("D")) != 0
+    pdh := phigh
+    pdl := plow
+
+// ─── Asian range ─────────────────────────────────────────────────────────────
+var float asi_h = na
+var float asi_l = na
+var float ar_h  = na
+var float ar_l  = na
+if in_asi
+    asi_h := na(asi_h) ? high : math.max(asi_h, high)
+    asi_l := na(asi_l) ? low  : math.min(asi_l, low)
+lon_open = in_lon and not in_lon[1]
+if lon_open
+    ar_h := asi_h
+    ar_l := asi_l
+    asi_h := na
+    asi_l := na
+
+// ─── Swing pivots ────────────────────────────────────────────────────────────
+ph = ta.pivothigh(high, i_swing, i_swing)
+pl = ta.pivotlow(low, i_swing, i_swing)
+var float lph = na
+var float lpl = na
+if not na(ph)
+    lph := ph
+if not na(pl)
+    lpl := pl
+
+// ─── Sweeps ──────────────────────────────────────────────────────────────────
+sw_bull = in_ses and ((not na(lpl) and low < lpl and close > lpl) or (not na(pdl) and low < pdl and close > pdl) or (not na(ar_l) and low < ar_l and close > ar_l))
+sw_bear = in_ses and ((not na(lph) and high > lph and close < lph) or (not na(pdh) and high > pdh and close < pdh) or (not na(ar_h) and high > ar_h and close < ar_h))
+
+var float  sw_lo      = na
+var float  sw_hi      = na
+var string sweep_type = "Swing"
+
+if sw_bull
+    sw_lo      := low
+    sweep_type := not na(pdl) and low < pdl ? "PDL" : not na(ar_l) and low < ar_l ? "AR_Low" : "Swing_Low"
+if sw_bear
+    sw_hi      := high
+    sweep_type := not na(pdh) and high > pdh ? "PDH" : not na(ar_h) and high > ar_h ? "AR_High" : "Swing_High"
+
+// ─── MSS ─────────────────────────────────────────────────────────────────────
+var int bull_bar = 0
+var int bear_bar = 0
+if sw_bull
+    bull_bar := bar_index
+if sw_bear
+    bear_bar := bar_index
+
+bull_mss = bar_index - bull_bar <= 30 and not na(lph) and close > lph and not na(sw_lo)
+bear_mss = bar_index - bear_bar <= 30 and not na(lpl) and close < lpl and not na(sw_hi)
+
+// ─── FVG ─────────────────────────────────────────────────────────────────────
+var bool bfvg_active = false
+var bool sfvg_active = false
+var int  bfvg_bar    = 0
+var int  sfvg_bar    = 0
+
+bfok_cur = low > high[2] and (low - high[2]) / close >= i_fvg_min
+sfok_cur = high < low[2] and (low[2] - high) / close >= i_fvg_min
+
+if bfok_cur
+    bfvg_active := true
+    bfvg_bar    := bar_index
+if sfok_cur
+    sfvg_active := true
+    sfvg_bar    := bar_index
+if bar_index - bfvg_bar > i_arm
+    bfvg_active := false
+if bar_index - sfvg_bar > i_arm
+    sfvg_active := false
+
+// ─── Order Blocks ────────────────────────────────────────────────────────────
+var float bob_hi  = na
+var float bob_lo  = na
+var int   bob_bar = 0
+var float sob_hi  = na
+var float sob_lo  = na
+var int   sob_bar = 0
+
+if close < open
+    bob_hi  := high
+    bob_lo  := low
+    bob_bar := bar_index
+if close > open
+    sob_hi  := high
+    sob_lo  := low
+    sob_bar := bar_index
+
+bob_active = not na(bob_hi) and bar_index - bob_bar <= i_arm
+sob_active = not na(sob_hi) and bar_index - sob_bar <= i_arm
+
+// ─── HTF bias ────────────────────────────────────────────────────────────────
+htf_close = request.security(syminfo.tickerid, i_htf, close[1],                   lookahead=barmerge.lookahead_off)
+htf_ema   = request.security(syminfo.tickerid, i_htf, ta.ema(close, i_htflen)[1], lookahead=barmerge.lookahead_off)
+htf_bull  = not na(htf_close) and not na(htf_ema) and htf_close > htf_ema
+htf_bear  = not na(htf_close) and not na(htf_ema) and htf_close < htf_ema
+
+// ─── Signals ─────────────────────────────────────────────────────────────────
+long_arr  = bfvg_active or bob_active
+short_arr = sfvg_active or sob_active
+
+long_sig  = in_ses and bull_mss and long_arr
+short_sig = in_ses and bear_mss and short_arr
+
+// ─── Grader ──────────────────────────────────────────────────────────────────
+var table gt = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 15), border_color=color.new(color.gray, 50), border_width=1)
+var int    gs = 0
+var string gl = "D"
+
+if long_sig or short_sig
+    sc = 0
+    sc := not na(sw_lo) or not na(sw_hi) ? sc + 2 : sc
+    sc := bull_mss or bear_mss            ? sc + 2 : sc
+    sc := long_arr or short_arr           ? sc + 2 : sc
+    sc := in_ses                          ? sc + 2 : sc
+    htf_ok = (long_sig and htf_bull) or (short_sig and htf_bear)
+    sc := htf_ok                          ? sc + 2 : sc
+    gs := sc
+    gl := sc >= 10 ? "A+" : sc >= 8 ? "A-" : sc >= 6 ? "B" : sc >= 4 ? "C" : "D"
+
+gc = gl == "A+" ? color.lime : gl == "A-" ? color.green : gl == "B" ? color.orange : gl == "C" ? color.red : color.gray
+
+alert_allowed = i_gatemode == "Off" ? (gl != "D") : i_gatemode == "A+ only" ? (gl == "A+") : (gl == "A+" or gl == "A-")
+
+// ─── Display-only SL/TP ─────────────────────────────────────────────────────
+long_comment  = bfvg_active and bob_active ? "FVG+OB_LONG"  : bfvg_active ? "FVG_LONG"  : "OB_LONG"
+short_comment = sfvg_active and sob_active ? "FVG+OB_SHORT" : sfvg_active ? "FVG_SHORT" : "OB_SHORT"
+
+tp_r = i_tp_usd / i_risk_usd
+
+float long_sl = na
+float long_tp = na
+float long_be = na
+if long_sig and not na(sw_lo)
+    dist_long = close - (sw_lo - i_buf)
+    if dist_long > 0
+        long_sl := sw_lo - i_buf
+        long_tp := close + dist_long * tp_r
+        long_be := close + dist_long
+
+float short_sl = na
+float short_tp = na
+float short_be = na
+if short_sig and not na(sw_hi)
+    dist_short = (sw_hi + i_buf) - close
+    if dist_short > 0
+        short_sl := sw_hi + i_buf
+        short_tp := close - dist_short * tp_r
+        short_be := close - dist_short
+
+// ─── Alerts ─────────────────────────────────────────────────────────────────
+if long_sig and alert_allowed and not na(long_sl) and not na(long_tp)
+    alert('{"ticker":"' + syminfo.ticker + '","action":"buy","timeframe":"' + timeframe.period + '","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(long_sl, "#.00") + ',"tp":' + str.tostring(long_tp, "#.00") + ',"be":' + str.tostring(long_be, "#.00") + ',"risk_usd":' + str.tostring(i_risk_usd) + ',"tp_usd":' + str.tostring(i_tp_usd) + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"' + long_comment + '","source":"' + i_source + '","secret":"' + i_secret + '"}', alert.freq_once_per_bar)
+
+if short_sig and alert_allowed and not na(short_sl) and not na(short_tp)
+    alert('{"ticker":"' + syminfo.ticker + '","action":"sell","timeframe":"' + timeframe.period + '","price":' + str.tostring(close, "#.00") + ',"sl":' + str.tostring(short_sl, "#.00") + ',"tp":' + str.tostring(short_tp, "#.00") + ',"be":' + str.tostring(short_be, "#.00") + ',"risk_usd":' + str.tostring(i_risk_usd) + ',"tp_usd":' + str.tostring(i_tp_usd) + ',"grade":"' + gl + '","score":' + str.tostring(gs) + ',"sweep":"' + sweep_type + '","session":"' + ses_lbl + '","comment":"' + short_comment + '","source":"' + i_source + '","secret":"' + i_secret + '"}', alert.freq_once_per_bar)
+
+// ─── Grader display ──────────────────────────────────────────────────────────
+htf_lbl   = htf_bull ? "BULL" : htf_bear ? "BEAR" : "-"
+htf_color = htf_bull ? color.lime : htf_bear ? color.red : color.gray
+
+if i_sgrd
+    table.cell(gt, 0, 0, "NOVA SIGNALS", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(gt, 1, 0, timeframe.period, text_color=color.aqua, bgcolor=color.navy, text_size=size.small)
+    table.cell(gt, 0, 1, "Grade",         text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 1, gl,              text_color=gc,          text_size=size.large)
+    table.cell(gt, 0, 2, "Score",         text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 2, str.tostring(gs) + "/10", text_color=color.white, text_size=size.small)
+    table.cell(gt, 0, 3, "Session",       text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 3, ses_lbl,         text_color=color.yellow, text_size=size.small)
+    table.cell(gt, 0, 4, "HTF Bias",      text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 4, htf_lbl,         text_color=htf_color,   text_size=size.small)
+    table.cell(gt, 0, 5, "Gate",          text_color=color.gray,  text_size=size.small)
+    table.cell(gt, 1, 5, i_gatemode,      text_color=color.aqua,  text_size=size.small)
+
+// ─── Visuals ─────────────────────────────────────────────────────────────────
+bgcolor(in_lon ? color.new(color.blue,  95) : na, title="London BG")
+bgcolor(in_ny  ? color.new(color.green, 95) : na, title="NY AM BG")
+
+plot(not na(pdh) ? pdh : na, "PDH",       color.new(color.orange, 40), 1)
+plot(not na(pdl) ? pdl : na, "PDL",       color.new(color.orange, 40), 1)
+plot(not na(ar_h) ? ar_h : na, "AR High", color.new(color.purple, 50), 1)
+plot(not na(ar_l) ? ar_l : na, "AR Low",  color.new(color.purple, 50), 1)
+
+plotshape(i_ssw and sw_bull, "Bull Sweep", shape.triangleup,   location.belowbar, color.new(color.aqua, 0), size=size.small)
+plotshape(i_ssw and sw_bear, "Bear Sweep", shape.triangledown, location.abovebar, color.new(color.red,  0), size=size.small)
+plotshape(bull_mss, "MSS Bull", shape.labelup,   location.belowbar, color.new(color.lime, 0), text="MSS", textcolor=color.black, size=size.tiny)
+plotshape(bear_mss, "MSS Bear", shape.labeldown, location.abovebar, color.new(color.red,  0), text="MSS", textcolor=color.white, size=size.tiny)
+
+plotshape(long_sig  and alert_allowed, "Long Signal",  shape.arrowup,   location.belowbar, color.lime, size=size.normal)
+plotshape(short_sig and alert_allowed, "Short Signal", shape.arrowdown, location.abovebar, color.red,  size=size.normal)

@@ -434,6 +434,118 @@ def _normalize_ticker(raw: str) -> str:
     return t
 
 
+def _build_signals_discord_embed(data: dict) -> dict:
+    """
+    Build a Discord embed for a NOVA ICT Signals broadcast. Matches the
+    premium-embed language used by the Hunnid Ticks bot (when that deploys
+    later) so the visual style is consistent across both paths.
+    """
+    ticker = str(data.get("ticker", "?")).upper()
+    action = str(data.get("action", "?")).lower()
+    is_long = action in ("buy", "long")
+    direction = "LONG" if is_long else "SHORT"
+    dir_emoji = "🟢" if is_long else "🔴"
+    tf = str(data.get("timeframe", "?"))
+    grade = str(data.get("grade", ""))
+    grade_emoji = (
+        "🏆" if grade == "A+"
+        else "⭐" if grade.startswith("A")
+        else "✨" if grade == "B"
+        else "•"
+    )
+    session = str(data.get("session") or "")
+    sweep   = str(data.get("sweep")   or "")
+    comment = str(data.get("comment") or "")
+
+    def _num(v: object, default: str = "—") -> str:
+        try:
+            return f"{float(v):,.2f}"
+        except (TypeError, ValueError):
+            return default
+
+    entry  = _num(data.get("price"))
+    sl_s   = _num(data.get("sl"))
+    tp_s   = _num(data.get("tp"))
+    risk_s = _num(data.get("risk_usd"))
+    tgt_s  = _num(data.get("tp_usd"))
+
+    color = 0x22c55e if is_long else 0xdc2626  # emerald / crimson
+
+    desc_bits = []
+    if comment: desc_bits.append(f"**Setup** · `{comment}`")
+    if sweep:   desc_bits.append(f"**Sweep** · `{sweep}`")
+    description = "   ".join(desc_bits) if desc_bits else None
+
+    title_parts = [dir_emoji, ticker, "—", direction]
+    if grade:
+        title_parts.extend([" ", grade_emoji, grade])
+
+    return {
+        "title": " ".join(title_parts).strip(),
+        "description": description,
+        "color": color,
+        "fields": [
+            {"name": "📍 Entry",   "value": f"`{entry}`",   "inline": True},
+            {"name": "🛑 Stop",    "value": f"`{sl_s}`",    "inline": True},
+            {"name": "🎯 Target",  "value": f"`{tp_s}`",    "inline": True},
+            {"name": "💰 Risk",    "value": f"`${risk_s}`", "inline": True},
+            {"name": "🏁 Reward",  "value": f"`${tgt_s}`",  "inline": True},
+            {"name": "📊 Session", "value": f"`{session or '—'}`", "inline": True},
+        ],
+        "footer": {"text": f"NOVA ICT signals · {tf} · Hunnid Ticks"},
+        "timestamp": datetime.now(tz=ZoneInfo("UTC")).isoformat(),
+    }
+
+
+def _dispatch_signal_only(data: dict, now: datetime):
+    """
+    Broadcast-only fork for NOVA ICT Signals (multi-TF indicator). Skips all
+    TradersPost routing and risk gating. Posts a rich embed to
+    NOVA_SIGNALS_DISCORD_WEBHOOK_URL (falls back to NOVA_DISCORD_WEBHOOK_URL
+    for a single channel deploy). Returns a 200 broadcast receipt.
+    """
+    ticker = str(data.get("ticker", "?")).upper()
+    action = str(data.get("action", "?")).lower()
+    tf     = str(data.get("timeframe", "?"))
+    grade  = str(data.get("grade", ""))
+    session = str(data.get("session") or "")
+
+    logger.info(
+        f"[signal-only] source={data.get('source')} ticker={ticker} "
+        f"action={action} tf={tf} grade={grade} session={session}"
+    )
+
+    webhook_url = (
+        os.environ.get("NOVA_SIGNALS_DISCORD_WEBHOOK_URL", "").strip()
+        or os.environ.get("NOVA_DISCORD_WEBHOOK_URL", "").strip()
+    )
+    posted = False
+    post_error = None
+    if webhook_url:
+        try:
+            embed = _build_signals_discord_embed(data)
+            resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=8)
+            resp.raise_for_status()
+            posted = True
+        except Exception as e:
+            post_error = str(e)
+            logger.warning(f"[signal-only] Discord post failed: {e}")
+    else:
+        post_error = "NOVA_SIGNALS_DISCORD_WEBHOOK_URL not configured"
+        logger.warning(f"[signal-only] {post_error}")
+
+    return jsonify({
+        "status":            "broadcast",
+        "posted_to_discord": posted,
+        "post_error":        post_error,
+        "ticker":            ticker,
+        "timeframe":         tf,
+        "grade":             grade,
+        "session":           session,
+        "time_est":          now.strftime("%Y-%m-%d %H:%M:%S"),
+    }), 200
+
+
 def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool, str, dict]:
     """
     Run every risk gate. Returns (ok, reason_if_blocked, gate_state).
@@ -527,6 +639,16 @@ def webhook():
 
     # 3. Reset daily state if new day
     reset_daily_state_if_new_day()
+
+    # 3.5 Signal-only fork — for NOVA ICT Signals indicator (multi-TF Discord
+    # broadcast). When a payload's `source` is tagged "NOVA ICT signals"
+    # (or similar variants), we skip TradersPost dispatch entirely and only
+    # broadcast to a Discord webhook. Does NOT touch open_positions,
+    # session_trades, trades_today, or daily_loss. Fully decoupled from live
+    # execution — pure community feed.
+    source_tag = str(data.get("source") or "").strip().lower()
+    if source_tag in {"nova ict signals", "nova_ict_signals", "signals"}:
+        return _dispatch_signal_only(data, now)
 
     # 4. Hand off to the Trading Commander — it runs the whole chain:
     #    enrich → gate → dispatch (TradersPost w/ retry → ManualEscalation)
