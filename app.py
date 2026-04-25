@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
+from subscriber_fanout import fanout_signal
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -576,6 +578,20 @@ def webhook():
     }
     state["open_positions"][enriched.ticker] = dict(state["last_signal"], opened_at=now.isoformat())
 
+    # Fan the same raw payload out to every NOVA Algo subscriber's TradersPost
+    # webhook. Runs after our own routing — never blocks the founder's fills.
+    # Subscribers are pulled from novaalgo.org (Clerk users with submitted URLs).
+    try:
+        fanout_result = fanout_signal(data)
+        logger.info(
+            f"[fanout] {fanout_result['ok']}/{fanout_result['fanned_to']} "
+            f"subscribers received the signal "
+            f"({fanout_result['fail']} failed)"
+        )
+    except Exception as fanout_err:  # noqa: BLE001
+        logger.warning(f"[fanout] unhandled fanout error: {fanout_err}")
+        fanout_result = {"fanned_to": 0, "ok": 0, "fail": 0, "details": []}
+
     logger.info(
         f"Signal {result.status} — session: {session} | "
         f"session trades: {state['session_trades'][session]}/{MAX_TRADES_PER_SESSION} | "
@@ -603,6 +619,11 @@ def webhook():
                 {"venue": a.venue, "success": a.success, "message": a.message}
                 for a in (result.dispatch.attempts if result.dispatch else [])
             ],
+        },
+        "fanout": {
+            "fanned_to": fanout_result["fanned_to"],
+            "ok":        fanout_result["ok"],
+            "fail":      fanout_result["fail"],
         },
     }
     return jsonify(response), 200
