@@ -27,10 +27,37 @@ from typing import Any
 
 SUBSCRIBERS_URL = os.environ.get("NOVA_SUBSCRIBERS_URL", "")
 FANOUT_SECRET = os.environ.get("FANOUT_SHARED_SECRET", "")
+HALT_URL = os.environ.get("NOVA_HALT_URL", "")  # e.g. https://novaalgo.org/api/fleet/halt
+FILLS_URL = os.environ.get("NOVA_FILLS_URL", "") # e.g. https://novaalgo.org/api/fills/record
 
 _cache: dict[str, Any] = {"at": 0.0, "data": []}
+_halt_cache: dict[str, Any] = {"at": 0.0, "halted": False, "reason": None}
 _CACHE_TTL_SECONDS = 30
+_HALT_TTL_SECONDS = 15  # check halt more frequently than the sub list
 _FANOUT_DEADLINE = 8.0
+
+
+def _halted() -> tuple[bool, str | None]:
+    """Cached check of the founder's fleet kill switch."""
+    if not HALT_URL or not FANOUT_SECRET:
+        return False, None
+    now = time.time()
+    if now - _halt_cache["at"] < _HALT_TTL_SECONDS:
+        return _halt_cache["halted"], _halt_cache.get("reason")
+    try:
+        req = urllib.request.Request(
+            HALT_URL,
+            headers={"X-NOVA-Fanout-Secret": FANOUT_SECRET},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            payload = json.loads(r.read().decode())
+        halted = bool(payload.get("halted"))
+        reason = payload.get("haltReason")
+        _halt_cache.update({"at": now, "halted": halted, "reason": reason})
+        return halted, reason
+    except Exception as e:  # noqa: BLE001
+        print(f"[fanout] halt check failed: {e}")
+        return _halt_cache.get("halted", False), _halt_cache.get("reason")
 
 
 def _fetch_subscribers() -> list[dict]:
@@ -73,8 +100,14 @@ def _post_one(url: str, payload: dict) -> tuple[int, str]:
 def fanout_signal(payload: dict) -> dict:
     """Send `payload` to every active subscriber webhook in parallel.
 
-    Returns a small result dict for logging. Never raises.
+    Returns a small result dict for logging. Never raises. Skips fanout entirely
+    if the founder has flipped the global halt switch on novaalgo.org.
     """
+    halted, reason = _halted()
+    if halted:
+        print(f"[fanout] HALTED — global kill switch active ({reason or 'manual'}); skipping fanout")
+        return {"fanned_to": 0, "ok": 0, "fail": 0, "halted": True, "reason": reason, "details": []}
+
     subs = _fetch_subscribers()
     if not subs:
         return {"fanned_to": 0, "ok": 0, "fail": 0, "details": []}
@@ -112,6 +145,44 @@ def fanout_signal(payload: dict) -> dict:
 
     ok_count = sum(1 for r in results if r["ok"])
     print(f"[fanout] {ok_count}/{len(subs)} subscribers received the signal")
+
+    # Log successful fills back to novaalgo.org for the subscriber's journal.
+    if FILLS_URL and FANOUT_SECRET and ok_count > 0:
+        try:
+            entries = []
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            for r in results:
+                if not r.get("ok"):
+                    continue
+                # Map sub back to identify them in the fills payload
+                matching_sub = next(
+                    (s for s in subs if s.get("userId") == r.get("userId")),
+                    None,
+                )
+                entries.append({
+                    "userId": r.get("userId"),
+                    "action": payload.get("action", "unknown"),
+                    "price": payload.get("price"),
+                    "sl": payload.get("sl"),
+                    "tp": payload.get("tp"),
+                    "ts": now_iso,
+                    "label": matching_sub.get("accountLabel") if matching_sub else None,
+                    "outcome": "filled",
+                })
+            if entries:
+                req = urllib.request.Request(
+                    FILLS_URL,
+                    data=json.dumps({"entries": entries}).encode(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-NOVA-Fanout-Secret": FANOUT_SECRET,
+                    },
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=5).read()
+        except Exception as e:  # noqa: BLE001
+            print(f"[fanout] fills journal log failed: {e}")
+
     return {
         "fanned_to": len(subs),
         "ok": ok_count,
