@@ -71,7 +71,7 @@ EST = ZoneInfo("America/New_York")
 # 2026-04-25: Apex 50K and Lucid 50K both blown — removed from active roster.
 # Only Apex 100K remains. Add new accounts back here as Sir picks them up.
 EVAL_ACCOUNTS = {
-    "apex_100k": {"label": "Apex 100K",  "current": 100000.00, "target": 106000.00},
+    "apex_100k": {"label": "Apex 100K",  "current": 99532.60, "target": 106000.00},
 }
 
 # Default account count a single signal fans out to via TradersPost. Used to
