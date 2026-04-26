@@ -115,14 +115,30 @@ ALLOWED_TICKERS = {
 }
 
 # ── In-memory state ───────────────────────────────────────────────────────────
+SIGNAL_RING_CAP = 50  # how many recent signals to keep for /signals/recent
+
 state = {
     "date":            None,
     "trades_today":    0,
     "daily_loss":      0.0,
     "session_trades":  {},
     "last_signal":     None,   # {"action", "price", "session", "ticker"}
+    "last_signals":    [],     # ring buffer of last SIGNAL_RING_CAP signals (newest first)
     "open_positions":  {},     # keyed by ticker → full signal dict at entry
 }
+
+
+def _record_signal(sig: dict, now: datetime) -> None:
+    """
+    Update both `last_signal` and the `last_signals` ring buffer.
+    Newest entry is at index 0; buffer is capped at SIGNAL_RING_CAP.
+    """
+    entry = dict(sig)
+    entry["recorded_at"] = now.isoformat()
+    state["last_signal"] = sig
+    state["last_signals"].insert(0, entry)
+    if len(state["last_signals"]) > SIGNAL_RING_CAP:
+        state["last_signals"] = state["last_signals"][:SIGNAL_RING_CAP]
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -599,7 +615,7 @@ def webhook():
     state["trades_today"] += 1
     state["session_trades"][session] = result.gates.get("session_trades", 0) + 1
     enriched = result.enriched
-    state["last_signal"] = {
+    _record_signal({
         "action":  enriched.action,
         "price":   enriched.price,
         "session": session,
@@ -613,7 +629,7 @@ def webhook():
         "source":  "webhook",
         "signal_id": enriched.signal_id,
         "status":  result.status,
-    }
+    }, now)
     state["open_positions"][enriched.ticker] = dict(state["last_signal"], opened_at=now.isoformat())
 
     # Fan the same raw payload out to every NOVA Algo subscriber's TradersPost
@@ -748,7 +764,7 @@ def execute_manual():
     # Mutate state
     state["trades_today"] += 1
     state["session_trades"][session] = gate_state["session_trades"] + 1
-    state["last_signal"] = {
+    _record_signal({
         "action":  data["action"],
         "price":   float(data["price"]),
         "session": session,
@@ -760,7 +776,7 @@ def execute_manual():
         "score":   int(data["score"])   if data.get("score") else None,
         "sweep":   data.get("sweep"),
         "source":  "execute",
-    }
+    }, now)
     state["open_positions"][ticker] = dict(state["last_signal"], opened_at=now.isoformat())
 
     log_path = log_trade_to_obsidian(data, session, now)
@@ -1052,6 +1068,25 @@ def status():
         "last_signal":     state.get("last_signal"),
         "open_positions":  state["open_positions"],
         "equity":          build_equity_data(),
+    }), 200
+
+
+@app.route("/signals/recent", methods=["GET"])
+def signals_recent():
+    """
+    Return the most recent NOVA signals (ring buffer, newest first).
+    Used by the founder dashboard at novaalgo.org/portal.
+    Optional query param `limit` caps the response (default 10, max 50).
+    """
+    try:
+        limit = int(request.args.get("limit", 10))
+    except (TypeError, ValueError):
+        limit = 10
+    limit = max(1, min(limit, SIGNAL_RING_CAP))
+    return jsonify({
+        "status":  "ok",
+        "count":   len(state["last_signals"]),
+        "signals": state["last_signals"][:limit],
     }), 200
 
 
