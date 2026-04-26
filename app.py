@@ -68,10 +68,10 @@ EXECUTABLE_GRADES = {"A+", "A"}
 EST = ZoneInfo("America/New_York")
 
 # ── Eval accounts ─────────────────────────────────────────────────────────────
+# 2026-04-25: Apex 50K and Lucid 50K both blown — removed from active roster.
+# Only Apex 100K remains. Add new accounts back here as Sir picks them up.
 EVAL_ACCOUNTS = {
-    "apex_50k":  {"label": "Apex 50K",   "current": 48598.30,  "target": 53000.00},
     "apex_100k": {"label": "Apex 100K",  "current": 100000.00, "target": 106000.00},
-    "lucid_50k": {"label": "Lucid 50K",  "current": 50000.00,  "target": 53000.00},
 }
 
 # Default account count a single signal fans out to via TradersPost. Used to
@@ -152,7 +152,45 @@ def reset_daily_state_if_new_day():
 
 
 def get_current_session(now: datetime) -> str | None:
+    """
+    Return the active NOVA session name, or None.
+
+    Weekend / weekday handling matches CME NQ futures hours:
+      • Saturday: market closed all day → None
+      • Sunday before 7 PM ET: market opens at 6 PM, Asia session starts 7 PM
+      • Sunday 7 PM–midnight: Asia
+      • Mon-Thu: all three sessions valid (Asia, London, NY_AM)
+      • Friday: London + NY_AM only — Asia (7 PM Fri) is dropped because
+        futures close at 5 PM ET Friday afternoon
+    """
+    weekday = now.weekday()  # Mon=0 ... Sun=6
     minutes = now.hour * 60 + now.minute
+
+    # Saturday — futures market closed all day
+    if weekday == 5:
+        return None
+
+    # Sunday — only Asia opens (7 PM-midnight ET); nothing else
+    if weekday == 6:
+        asia = SESSIONS.get("Asia")
+        if not asia:
+            return None
+        start = asia["start"][0] * 60 + asia["start"][1]
+        end   = asia["end"][0]   * 60 + asia["end"][1]
+        return "Asia" if start <= minutes < end else None
+
+    # Friday — futures close at 5 PM ET, so no Asia session that evening.
+    if weekday == 4:
+        for name, window in SESSIONS.items():
+            if name == "Asia":
+                continue
+            start = window["start"][0] * 60 + window["start"][1]
+            end   = window["end"][0]   * 60 + window["end"][1]
+            if start <= minutes < end:
+                return name
+        return None
+
+    # Mon-Thu — all sessions valid
     for name, window in SESSIONS.items():
         start = window["start"][0] * 60 + window["start"][1]
         end   = window["end"][0]   * 60 + window["end"][1]
