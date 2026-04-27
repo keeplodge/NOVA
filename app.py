@@ -69,9 +69,11 @@ EST = ZoneInfo("America/New_York")
 
 # ── Eval accounts ─────────────────────────────────────────────────────────────
 # 2026-04-25: Apex 50K and Lucid 50K both blown — removed from active roster.
-# Only Apex 100K remains. Add new accounts back here as Sir picks them up.
+# 2026-04-26: Sir picked up a fresh Lucid 50K eval. Adding back at standard
+# 6% profit target ($50K → $53K). Apex 100K continues at its prior balance.
 EVAL_ACCOUNTS = {
     "apex_100k": {"label": "Apex 100K",  "current": 99532.60, "target": 106000.00},
+    "lucid_50k": {"label": "Lucid 50K",  "current": 50000.00, "target": 53000.00},
 }
 
 # Default account count a single signal fans out to via TradersPost. Used to
