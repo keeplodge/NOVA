@@ -48,13 +48,10 @@ def _webhook_auth_ok(req) -> tuple[bool, str]:
 TRADERSPOST_WEBHOOK_URL = os.environ.get("TRADERSPOST_WEBHOOK_URL", "")
 MAX_TRADES_PER_DAY      = 5   # 1 Asia + 1 London + 2 NY AM (+1 buffer)
 
-# Per-session caps — asymmetric. London is a confirmation window, NY AM is
-# where liquidity + displacement stack up so we allow a second shot if the
-# first closes or gets stopped mid-session. Asia added 2026-04-20 after
-# backtest showed +28% Sharpe; capped tight due to thin liquidity / spread risk.
+# Per-session caps. NOVA Algo subscriber-facing product is NY-AM-only as of
+# 2026-04-27 — Asia and London removed from the routing gate per Sir's call.
+# Any Pine alert outside 8:30am-11am ET gets rejected at the session check.
 SESSION_TRADE_CAPS = {
-    "Asia":   1,
-    "London": 1,
     "NY_AM":  2,
 }
 # Fallback for any future session that isn't in the map
@@ -107,12 +104,13 @@ def build_equity_data() -> list[dict]:
     return result
 
 # ── Session windows (EST) ─────────────────────────────────────────────────────
-# NOVA trades NQ futures: Asia (post-backtest add 2026-04-20) + London + NY AM.
-# Weekend crypto remains permanently off.
+# NOVA trades NQ futures, NY-AM only (post-cash-open 9:30am ET → 11am ET).
+# 2026-04-27: Sir locked scope to NYSE cash open onward — pre-cash-open 8:30-9:30
+# window dropped to skip macro-print whipsaw (CPI/NFP/Powell at 8:30 ET sharp).
+# Asia + London sessions removed entirely from the Railway gate.
+# Weekend / Saturday remains permanently off.
 SESSIONS = {
-    "Asia":   {"start": (19, 0),  "end": (24, 0)},  # 7pm-midnight ET (1900-0000)
-    "London": {"start": (2,  0),  "end": (5,  0)},
-    "NY_AM":  {"start": (8, 30),  "end": (11, 0)},
+    "NY_AM":  {"start": (9, 30),  "end": (11, 0)},
 }
 
 # NQ-only ticker allowlist. Pine's {{ticker}} can render as any of these
@@ -180,13 +178,14 @@ def get_current_session(now: datetime) -> str | None:
     """
     Return the active NOVA session name, or None.
 
-    Weekend / weekday handling matches CME NQ futures hours:
+    NOVA Algo is NY-AM-only as of 2026-04-27 (post-NYSE cash open).
+    The Asia/Sunday/Friday handling below is preserved as defense in depth — if
+    SESSIONS ever gets re-extended, weekend/Friday rules still hold.
+
       • Saturday: market closed all day → None
-      • Sunday before 7 PM ET: market opens at 6 PM, Asia session starts 7 PM
-      • Sunday 7 PM–midnight: Asia
-      • Mon-Thu: all three sessions valid (Asia, London, NY_AM)
-      • Friday: London + NY_AM only — Asia (7 PM Fri) is dropped because
-        futures close at 5 PM ET Friday afternoon
+      • Sunday: no trading (Asia removed from SESSIONS)
+      • Mon-Fri 9:30-11am ET: NY_AM
+      • All other times: None
     """
     weekday = now.weekday()  # Mon=0 ... Sun=6
     minutes = now.hour * 60 + now.minute
@@ -543,7 +542,7 @@ def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool,
     if is_weekend:
         return False, f"Rejected — futures market closed on weekend ({norm})", gate_state
     if session is None:
-        return False, f"Rejected — outside London/NY_AM sessions ({now.strftime('%H:%M %Z')})", gate_state
+        return False, f"Rejected — outside NY AM session 9:30-11:00 ET ({now.strftime('%H:%M %Z')})", gate_state
     session_cap = SESSION_TRADE_CAPS.get(session, MAX_TRADES_PER_SESSION)
     gate_state["session_cap"] = session_cap
     if session_count >= session_cap:
