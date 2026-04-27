@@ -11,6 +11,13 @@ from dotenv import load_dotenv
 
 from subscriber_fanout import fanout_signal
 
+# NOVA Algo Discord bridge — best-effort, every call is silent no-op when env
+# vars are unset. Never let a Discord post failure break a trade dispatch.
+try:
+    import nova_algo_discord_bridge as discord_bridge
+except Exception as _e:  # noqa: BLE001
+    discord_bridge = None
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -593,6 +600,20 @@ def webhook():
     result    = commander.handle(data)
 
     if result.status == "rejected":
+        # Hard-limit rejections (DD hit, daily cap, session cap) are interesting
+        # to subscribers — surface them in #halt-events. Grade/auth rejections
+        # stay silent so the channel doesn't fill with noise.
+        if discord_bridge:
+            try:
+                msg = (result.message or "").lower()
+                if any(w in msg for w in ("loss limit", "daily limit", "max ", "trade limit", "already open")):
+                    discord_bridge.post_gate_rejection(
+                        ticker=(result.enriched.ticker if result.enriched else (data.get("ticker") or "?")),
+                        reason=result.message,
+                        gate_state=result.gates or {},
+                    )
+            except Exception as _be:  # noqa: BLE001
+                logger.warning(f"[discord-bridge] gate rejection notify failed: {_be}")
         return jsonify({
             "status":  "rejected",
             "message": result.message,
@@ -601,6 +622,11 @@ def webhook():
         }), 200
 
     if result.status == "error":
+        if discord_bridge and result.enriched and result.dispatch:
+            try:
+                discord_bridge.post_signal_failed(result.enriched, result.dispatch)
+            except Exception as _be:  # noqa: BLE001
+                logger.warning(f"[discord-bridge] signal_failed notify failed: {_be}")
         return jsonify({
             "status":  "error",
             "message": result.message,
@@ -647,6 +673,19 @@ def webhook():
     except Exception as fanout_err:  # noqa: BLE001
         logger.warning(f"[fanout] unhandled fanout error: {fanout_err}")
         fanout_result = {"fanned_to": 0, "ok": 0, "fail": 0, "details": []}
+
+    # Mirror this signal to the NOVA Algo Discord — #live-signals + #fanout-failures
+    # if any subscribers failed. Best-effort; never blocks the response.
+    if discord_bridge and result.enriched and result.dispatch:
+        try:
+            discord_bridge.post_signal_executed(
+                result.enriched, result.dispatch, fanout_summary=fanout_result,
+            )
+            failures = [d for d in (fanout_result.get("details") or []) if not d.get("ok")]
+            if failures:
+                discord_bridge.post_fanout_failures(failures, total=fanout_result.get("fanned_to", 0))
+        except Exception as _be:  # noqa: BLE001
+            logger.warning(f"[discord-bridge] live-signals mirror failed: {_be}")
 
     logger.info(
         f"Signal {result.status} — session: {session} | "
@@ -1071,6 +1110,80 @@ def status():
         "open_positions":  state["open_positions"],
         "equity":          build_equity_data(),
     }), 200
+
+
+# ── Discord bridge endpoints (admin / observability) ─────────────────────────
+
+@app.route("/discord/test", methods=["GET", "POST"])
+def discord_test():
+    """Fire one test embed to each configured NOVA Algo Discord channel.
+
+    Auth: requires NOVA_WEBHOOK_SECRET as `?secret=...` or X-Nova-Secret header.
+    Public if NOVA_WEBHOOK_SECRET is unset (matches /webhook auth model).
+    """
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    results = discord_bridge.smoke_test()
+    return jsonify({"status": "ok", "results": results}), 200
+
+
+@app.route("/discord/equity/post", methods=["POST"])
+def discord_equity_post():
+    """Push current equity snapshot to #equity-curve. Used by daily cron."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    day_pnl = body.get("day_pnl_total")
+    try:
+        day_pnl = float(day_pnl) if day_pnl is not None else None
+    except (TypeError, ValueError):
+        day_pnl = None
+    ok = discord_bridge.post_equity_snapshot(build_equity_data(), day_pnl_total=day_pnl)
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+@app.route("/discord/eod/post", methods=["POST"])
+def discord_eod_post():
+    """Push EOD recap to #eod-recap. Cron at 16:30 ET."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    ok = discord_bridge.post_eod_recap(
+        trades_today=int(body.get("trades_today", state["trades_today"])),
+        wins=int(body.get("wins", 0)),
+        losses=int(body.get("losses", 0)),
+        breakeven=int(body.get("breakeven", 0)),
+        day_pnl=float(body.get("day_pnl", -state["daily_loss"])),
+        notes=body.get("notes"),
+    )
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+@app.route("/discord/morning/post", methods=["POST"])
+def discord_morning_post():
+    """Push morning brief to #morning-brief. Cron at 08:00 ET."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    ok = discord_bridge.post_morning_brief(
+        bias=body.get("bias"),
+        levels=body.get("levels") or {},
+        conditions=body.get("conditions"),
+        notes=body.get("notes"),
+    )
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
 
 
 @app.route("/signals/recent", methods=["GET"])
