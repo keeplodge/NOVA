@@ -30,6 +30,11 @@ FANOUT_SECRET = os.environ.get("FANOUT_SHARED_SECRET", "")
 HALT_URL = os.environ.get("NOVA_HALT_URL", "")  # e.g. https://novaalgo.org/api/fleet/halt
 FILLS_URL = os.environ.get("NOVA_FILLS_URL", "") # e.g. https://novaalgo.org/api/fills/record
 
+# Founder Clerk userId — when set, each NOVA signal also writes per-eval
+# fill entries to founder's Clerk metadata so /portal/journal tap-buttons
+# work for the founder's own accounts.
+FOUNDER_USER_ID = os.environ.get("NOVA_FOUNDER_USER_ID", "")
+
 _cache: dict[str, Any] = {"at": 0.0, "data": []}
 _halt_cache: dict[str, Any] = {"at": 0.0, "halted": False, "reason": None}
 _CACHE_TTL_SECONDS = 30
@@ -147,14 +152,18 @@ def fanout_signal(payload: dict) -> dict:
     print(f"[fanout] {ok_count}/{len(subs)} subscribers received the signal")
 
     # Log successful fills back to novaalgo.org for the subscriber's journal.
-    if FILLS_URL and FANOUT_SECRET and ok_count > 0:
+    # Also: when NOVA_FOUNDER_USER_ID is set, writes one entry per active
+    # eval account on the founder's record so /portal/journal tap-buttons
+    # work for the founder's own real accounts (Apex 100K, Lucid 50K, etc.).
+    if FILLS_URL and FANOUT_SECRET:
         try:
             entries = []
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+            # Subscriber entries (one per delivered fanout)
             for r in results:
                 if not r.get("ok"):
                     continue
-                # Map sub back to identify them in the fills payload
                 matching_sub = next(
                     (s for s in subs if s.get("userId") == r.get("userId")),
                     None,
@@ -169,6 +178,28 @@ def fanout_signal(payload: dict) -> dict:
                     "label": matching_sub.get("accountLabel") if matching_sub else None,
                     "outcome": "filled",
                 })
+
+            # Founder entries — one per eval account so per-account PnL
+            # tracking works across all of Sir's prop accounts.
+            if FOUNDER_USER_ID:
+                try:
+                    # Pull the live eval roster from app.py — same dict that
+                    # /status uses, so it always reflects what's actually live.
+                    from app import EVAL_ACCOUNTS  # local import to avoid bootup circularity
+                    for acct_id, acct in EVAL_ACCOUNTS.items():
+                        entries.append({
+                            "userId": FOUNDER_USER_ID,
+                            "action": payload.get("action", "unknown"),
+                            "price": payload.get("price"),
+                            "sl": payload.get("sl"),
+                            "tp": payload.get("tp"),
+                            "ts": now_iso,
+                            "label": acct.get("label", acct_id),
+                            "outcome": "filled",
+                        })
+                except Exception as fe:  # noqa: BLE001
+                    print(f"[fanout] founder eval-roster import failed: {fe}")
+
             if entries:
                 req = urllib.request.Request(
                     FILLS_URL,
