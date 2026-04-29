@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
-from subscriber_fanout import fanout_signal
+from subscriber_fanout import fanout_signal, fanout_exit
 
 # NOVA Algo Discord bridge — best-effort, every call is silent no-op when env
 # vars are unset. Never let a Discord post failure break a trade dispatch.
@@ -265,17 +265,24 @@ def expire_stale_positions(now: datetime) -> list[dict]:
 
 
 def validate_payload(data: dict) -> tuple[bool, str]:
-    for field in ("ticker", "action", "price"):
-        if field not in data:
-            return False, f"Missing required field: '{field}'"
+    # Required for all actions
+    if "ticker" not in data:
+        return False, "Missing required field: 'ticker'"
+    if "action" not in data:
+        return False, "Missing required field: 'action'"
 
-    if data["action"] not in ("buy", "sell"):
-        return False, f"Invalid action '{data['action']}' — must be 'buy' or 'sell'"
+    if data["action"] not in ("buy", "sell", "exit"):
+        return False, f"Invalid action '{data['action']}' — must be 'buy', 'sell', or 'exit'"
 
-    try:
-        float(data["price"])
-    except (TypeError, ValueError):
-        return False, f"Invalid price value: '{data['price']}'"
+    # Price required only for entries (buy/sell). Exits don't need a target price —
+    # TradersPost closes at market on receiving an exit action.
+    if data["action"] in ("buy", "sell"):
+        if "price" not in data:
+            return False, "Missing required field: 'price' (required for buy/sell)"
+        try:
+            float(data["price"])
+        except (TypeError, ValueError):
+            return False, f"Invalid price value: '{data['price']}'"
 
     return True, "OK"
 
@@ -557,6 +564,55 @@ def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool,
     return True, "OK", gate_state
 
 
+def _handle_exit_signal(data: dict, now):
+    """Handle an exit signal — bypasses all gates. Forwards exit to Sir's
+    primary TP + fanouts exit to every approved subscriber's TP. Clears the
+    Railway open_positions tracker for this ticker.
+
+    Triggered by Pine alert(action="exit") when:
+      - active SL is touched (covers original SL, BE move, Trail move)
+      - session close at 11:00 ET with position still open
+    """
+    ticker = str(data.get("ticker", "")).upper().strip()
+    if not ticker:
+        return jsonify({"status": "error", "message": "ticker required for exit"}), 400
+
+    comment = str(data.get("comment", "NOVA exit"))
+    logger.info(f"/webhook EXIT — {ticker} | {comment}")
+
+    # Forward to Sir's primary TP (Apex/Lucid stack)
+    tp_payload = build_traderspost_close(ticker, comment)
+    primary_ok, primary_resp = forward_to_traderspost(tp_payload)
+    if not primary_ok:
+        logger.error(f"/webhook exit — primary TP forward failed: {primary_resp}")
+
+    # Fanout exit to every approved subscriber's TP
+    try:
+        fanout_result = fanout_exit(data)
+        logger.info(
+            f"[fanout-exit] {fanout_result.get('ok',0)}/{fanout_result.get('fanned_to',0)} "
+            f"subscribers received exit ({fanout_result.get('fail',0)} failed)"
+        )
+    except Exception as fanout_err:  # noqa: BLE001
+        logger.warning(f"[fanout-exit] unhandled error: {fanout_err}")
+        fanout_result = {"fanned_to": 0, "ok": 0, "fail": 0, "details": []}
+
+    # Clear Railway state — kills the ghost position tracker
+    state["open_positions"].pop(ticker, None)
+
+    return jsonify({
+        "status":     "exit_executed",
+        "ticker":     ticker,
+        "comment":    comment,
+        "primary_ok": primary_ok,
+        "fanout":     {
+            "fanned_to": fanout_result.get("fanned_to", 0),
+            "ok":        fanout_result.get("ok", 0),
+            "fail":      fanout_result.get("fail", 0),
+        },
+    }), 200
+
+
 # ── Webhook endpoint ──────────────────────────────────────────────────────────
 
 @app.route("/webhook", methods=["POST"])
@@ -588,6 +644,12 @@ def webhook():
     if not valid:
         logger.warning(f"Payload validation failed: {validation_message}")
         return jsonify({"status": "error", "message": validation_message}), 400
+
+    # 2.5. Exit action: short-circuit before gates. Exits are ALWAYS allowed —
+    # outside session, past daily-loss cap, weekend, etc. — because flattening
+    # is the safety valve.
+    if data.get("action") == "exit":
+        return _handle_exit_signal(data, now)
 
     # 3. Reset daily state if new day
     reset_daily_state_if_new_day()

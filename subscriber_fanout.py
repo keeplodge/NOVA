@@ -220,3 +220,69 @@ def fanout_signal(payload: dict) -> dict:
         "fail": len(subs) - ok_count,
         "details": results,
     }
+
+
+def fanout_exit(data: dict) -> dict:
+    """Send an exit signal to every approved subscriber's TradersPost webhook.
+
+    Mirrors `fanout_signal` but with an exit-specific payload (no entry price,
+    no SL/TP — just `action: "exit"`). Used by the Pine Master strategy when:
+      - active SL is touched (original SL / BE / Trail level)
+      - session close at 11:00 ET with position still open
+
+    Returns the same shape as `fanout_signal` for consistent logging.
+    """
+    halted, reason = _halted()
+    if halted:
+        print(f"[fanout-exit] HALTED — global kill switch active ({reason or 'manual'})")
+        return {"fanned_to": 0, "ok": 0, "fail": 0, "halted": True, "reason": reason, "details": []}
+
+    subs = _fetch_subscribers()
+    if not subs:
+        return {"fanned_to": 0, "ok": 0, "fail": 0, "details": []}
+
+    payload = {
+        "ticker":  str(data.get("ticker", "")).upper().strip(),
+        "action":  "exit",
+        "comment": str(data.get("comment", "NOVA exit")),
+    }
+
+    results: list[dict] = []
+    threads: list[threading.Thread] = []
+    lock = threading.Lock()
+
+    def _worker(sub: dict) -> None:
+        url = sub.get("webhookUrl")
+        if not url:
+            return
+        status, body = _post_one(url, payload)
+        ok = 200 <= (status or 0) < 300
+        with lock:
+            results.append({
+                "userId": sub.get("userId"),
+                "email":  sub.get("email"),
+                "label":  sub.get("accountLabel"),
+                "ok":     ok,
+                "status": status,
+                "body":   body,
+            })
+
+    for sub in subs:
+        t = threading.Thread(target=_worker, args=(sub,), daemon=True)
+        threads.append(t)
+        t.start()
+
+    deadline = time.time() + _FANOUT_DEADLINE
+    for t in threads:
+        remaining = max(0.0, deadline - time.time())
+        t.join(timeout=remaining)
+
+    ok_count = sum(1 for r in results if r["ok"])
+    print(f"[fanout-exit] {ok_count}/{len(subs)} subscribers received exit")
+
+    return {
+        "fanned_to": len(subs),
+        "ok":        ok_count,
+        "fail":      len(subs) - ok_count,
+        "details":   results,
+    }
