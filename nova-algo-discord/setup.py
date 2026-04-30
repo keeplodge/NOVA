@@ -43,6 +43,7 @@ GREY = Color(0x6B7280)
 ROLES = [
     ("Founder", GOLD, True, True),
     ("Co-Founder", SILVER, True, True),
+    ("Marketing", Color(0xEC4899), True, True),
     ("Moderator", RED, True, True),
     ("Coach", PURPLE, True, True),
     ("Fleet", NOVA_CYAN, True, True),
@@ -88,7 +89,7 @@ CATEGORIES = [
         ("news-feed", "text", "read_only", "High-impact macro events.", 0),
     ]),
     ("🎓 EDUCATION", [
-        ("ict-fundamentals", "text", "open", "ICT theory, concepts, primers.", 60),
+        ("ict-fundamentals", "text", "open", "NY AM ORB fundamentals · NOVA does NOT use ICT.", 60),
         ("strategy-deep-dive", "text", "open", "How NOVA's logic actually works.", 60),
         ("video-lessons", "text", "read_only", "Curated video lessons.", 0),
         ("market-structure", "text", "open", "BOS, MSS, liquidity.", 60),
@@ -153,6 +154,7 @@ def _build_overwrites(guild, role_map, pattern, *, voice=False):
     bot = guild.me
     founder = role_map.get("Founder")
     co_founder = role_map.get("Co-Founder")
+    marketing = role_map.get("Marketing")
     moderator = role_map.get("Moderator")
 
     if pattern == "open":
@@ -184,6 +186,11 @@ def _build_overwrites(guild, role_map, pattern, *, voice=False):
                 view_channel=True, send_messages=True, embed_links=True,
                 attach_files=True,
             )
+        if marketing:
+            ow[marketing] = PermissionOverwrite(
+                view_channel=True, send_messages=True, embed_links=True,
+                attach_files=True,
+            )
         if moderator:
             ow[moderator] = PermissionOverwrite(
                 view_channel=True, send_messages=True, manage_messages=True,
@@ -200,7 +207,7 @@ def _build_overwrites(guild, role_map, pattern, *, voice=False):
                     view_channel=True, send_messages=True,
                     read_message_history=True, embed_links=True, attach_files=True,
                 )
-        for staff in (founder, co_founder, moderator):
+        for staff in (founder, co_founder, marketing, moderator):
             if staff:
                 ow[staff] = PermissionOverwrite(
                     view_channel=True, send_messages=True, read_message_history=True,
@@ -213,7 +220,7 @@ def _build_overwrites(guild, role_map, pattern, *, voice=False):
 
     if pattern == "staff":
         ow[everyone] = PermissionOverwrite(view_channel=False)
-        for staff in (founder, co_founder, moderator):
+        for staff in (founder, co_founder, marketing, moderator):
             if staff:
                 ow[staff] = PermissionOverwrite(
                     view_channel=True, send_messages=True, read_message_history=True,
