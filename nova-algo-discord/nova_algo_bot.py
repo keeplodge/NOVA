@@ -53,6 +53,7 @@ STATE_DIR = os.path.join(os.path.dirname(__file__), ".bot_state")
 os.makedirs(STATE_DIR, exist_ok=True)
 TRIVIA_PATH = os.path.join(os.path.dirname(__file__), "content", "trivia.json")
 COFFEE_PATH = os.path.join(os.path.dirname(__file__), "content", "coffee_prompts.json")
+FAQ_PATH = os.path.join(os.path.dirname(__file__), "content", "faq.json")
 TRIVIA_LB_PATH = os.path.join(STATE_DIR, "trivia_leaderboard.json")
 TRIVIA_OPEN_PATH = os.path.join(STATE_DIR, "trivia_open.json")
 WIN_PINNED_PATH = os.path.join(STATE_DIR, "win_pinned.json")
@@ -313,6 +314,126 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
             print(f"[bot] −{role_name} → {member.name}", flush=True)
         except discord.Forbidden:
             print(f"[bot] missing perms to remove {role_name}", flush=True)
+
+
+# ── /faq slash command ──────────────────────────────────────────────────────
+
+@tree.command(
+    name="faq",
+    description="Browse NOVA Algo FAQ — common questions answered.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_faq(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False, ephemeral=True)
+    try:
+        with open(FAQ_PATH, "r", encoding="utf-8") as f:
+            faq = json.load(f)
+    except Exception:
+        await interaction.followup.send("FAQ unavailable right now.", ephemeral=True)
+        return
+    embed = discord.Embed(
+        title="❓ NOVA Algo · FAQ",
+        color=0x00F5D4,
+        description="Common questions, fast answers.",
+    )
+    for entry in faq[:10]:
+        q = entry.get("q", "")[:240]
+        a = entry.get("a", "")[:1000]
+        embed.add_field(name=f"Q: {q}", value=a, inline=False)
+    embed.set_footer(text="NOVA Algo · /faq · ask more in #ask-a-coach")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ── /strategy slash command ─────────────────────────────────────────────────
+
+@tree.command(
+    name="strategy",
+    description="The NOVA Algo strategy in one card — rules, risk, exits.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_strategy(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False, ephemeral=True)
+    embed = discord.Embed(
+        title="📐 NOVA NQ ORB · NY AM 30m",
+        color=0x00F5D4,
+        description=(
+            "**Pure stop-entry breakout.** No ICT prediction, no confirmation candle. "
+            "First side of the 9:30 OR to break wins."
+        ),
+    )
+    embed.add_field(name="Session", value="9:30 – 11:00 ET, weekdays only", inline=True)
+    embed.add_field(name="Timeframe", value="30-minute · NQ futures", inline=True)
+    embed.add_field(name="OR bar", value="The 9:30 ET 30m candle", inline=True)
+    embed.add_field(name="Entry", value="Buy-stop @ OR_high+1t · Sell-stop @ OR_low−1t · armed 10:00", inline=False)
+    embed.add_field(name="Risk", value="$500 fixed SL · 1 contract", inline=True)
+    embed.add_field(name="Target", value="$2,000 fixed TP · 4R", inline=True)
+    embed.add_field(name="Trade mgmt", value="BE @ $500 · Trail @ $750 · Hard out 11:00 ET", inline=False)
+    embed.add_field(
+        name="Verified edge",
+        value="**82.6% WR · PF 7.78 · 322 trades · +$155,645 net** (Jan 2025 → Apr 2026 backtest, growing live)",
+        inline=False,
+    )
+    embed.set_footer(text=f"NOVA Algo · /strategy · {SITE_BASE.replace('https://','')}/performance")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ── /next-event slash command ───────────────────────────────────────────────
+
+@tree.command(
+    name="next-event",
+    description="Next high-impact USD macro print today.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_next_event(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=False)
+    try:
+        with urllib.request.urlopen(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            timeout=6,
+        ) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        await interaction.followup.send("Couldn't fetch the macro feed right now.", ephemeral=True)
+        return
+    today_iso = datetime.now(EST).strftime("%Y-%m-%d")
+    now_iso = datetime.now(EST).isoformat()
+    upcoming = []
+    for ev in data:
+        ts = ev.get("date") or ""
+        if not ts.startswith(today_iso):
+            continue
+        currency = (ev.get("country") or ev.get("currency") or "").upper()
+        if currency not in ("USD", ""):
+            continue
+        impact = (ev.get("impact") or "").lower()
+        if impact != "high":
+            continue
+        if ts >= now_iso:
+            upcoming.append(ev)
+    if not upcoming:
+        await interaction.followup.send(
+            "📰 No high-impact USD prints left today. Pure technicals — clean ORB read."
+        )
+        return
+    upcoming.sort(key=lambda e: e.get("date", ""))
+    next_ev = upcoming[0]
+    next_time = next_ev.get("date", "")[11:16]
+    embed = discord.Embed(
+        title="📰 Next macro print",
+        color=0xF59E0B,
+        description=(
+            f"**{next_time} ET · {next_ev.get('title','Event')}**\n"
+            f"Forecast: {next_ev.get('forecast','—')} · Prior: {next_ev.get('previous','—')}"
+        ),
+    )
+    if len(upcoming) > 1:
+        rest = "\n".join(
+            f"• **{e.get('date','')[11:16]} ET** · {e.get('title','')}"
+            for e in upcoming[1:5]
+        )
+        embed.add_field(name="Also today", value=rest, inline=False)
+    embed.set_footer(text="NOVA Algo · ForexFactory feed")
+    await interaction.followup.send(embed=embed)
 
 
 # ── Bias poll buttons (#pre-market) ─────────────────────────────────────────

@@ -1,0 +1,42 @@
+[
+  {
+    "q": "What is NOVA Algo?",
+    "a": "An automated NY AM Opening Range Breakout strategy on NQ futures. Pine fires the signal, Railway validates, TradersPost executes on your prop account. 82.6% backtest WR, 7.78 PF over 322 trades."
+  },
+  {
+    "q": "What does it cost?",
+    "a": "Signal $97/mo (alerts only) · Auto $297/mo (auto-routed) · Fleet $997/mo (inner circle). Beta tier = free Fleet forever for the first 10 testers."
+  },
+  {
+    "q": "Which prop firms does it work with?",
+    "a": "Any prop firm that accepts TradersPost as a broker — Apex, Lucid, Topstep, MyFundedFutures, and more. As long as TradersPost has a connection, NOVA can route to it."
+  },
+  {
+    "q": "How do I onboard?",
+    "a": "30 minutes total. Step-by-step at novaalgo.org/portal/connect. You give us your TradersPost webhook URL, we approve it, and the next NOVA fire routes through automatically."
+  },
+  {
+    "q": "What's the trade window?",
+    "a": "9:30 – 11:00 ET, NY AM only. Triggers arm at 10:00 ET. One trade per day max. No weekends, no overnight, no other sessions."
+  },
+  {
+    "q": "What's the risk per trade?",
+    "a": "$500 fixed stop loss. $2,000 fixed take-profit. 4R. 1 contract per fire. Daily loss cap of $500 — pipeline halts if hit."
+  },
+  {
+    "q": "What if NOVA doesn't fire today?",
+    "a": "About 30% of days resolve no-trade — price stays inside the OR. That's expected. The algo doesn't force trades. Better to skip a day than to chop into bad signals."
+  },
+  {
+    "q": "What's BE / Trail?",
+    "a": "Breakeven moves at $500 in profit (SL slides to entry). Trail engages at $750 in profit and ratchets up. Both auto-propagate to all routed accounts via Pine alert(action='exit') on tick touch."
+  },
+  {
+    "q": "Can I see live performance?",
+    "a": "Yes — novaalgo.org/performance shows merged backtest + live forward stats, updates with every closed fill. novaalgo.org/community shows the cohort leaderboard."
+  },
+  {
+    "q": "What if I have a question that isn't answered?",
+    "a": "Drop it in #ask-a-coach (open thread per question) or in #contact-founder for direct line to Gee."
+  }
+]

@@ -58,5 +58,70 @@
     "title": "The 'no-fire day' — why ~30% of days resolve no-trade",
     "body": "On about 3 in 10 NY AM sessions, price stays inside the Opening Range from 9:30 to 11:00 ET. No breakout. No trigger. No trade.\n\nThis is a feature, not a bug. The setup is conditional — it requires a clean break to fire. Range-bound days lack the impulse the strategy needs. Forcing a trade into chop is how 80% win rates become 60% win rates.\n\nNOVA's discipline: zero is a position. The best trade some days is the one we don't take. The cohort doesn't lose money on no-fire days. We just wait.",
     "takeaway": "Patience is part of the strategy. The setup not appearing IS the setup not appearing."
+  },
+  {
+    "title": "Order blocks — institutional fingerprints",
+    "body": "An order block is the last bullish candle before a sharp bearish move (or vice versa). In ICT theory, this candle marks where institutional sell orders accumulated before the drop. Price often returns to fill into that block before continuing in the bearish direction.\n\nFor NOVA: order blocks are CONTEXT, not entry signals. If yesterday's high was an order block (large bull candle, then sharp drop), today's OR may be inside/below it. A long break has resistance overhead — fast move OR rejection. A short break has clear air below.\n\nMap the order blocks pre-market. The strategy still fires on stop-break, but you'll know what to expect.",
+    "takeaway": "Institutional levels don't predict — they describe. Use them to size expectations, not to override the trigger."
+  },
+  {
+    "title": "Why the 9:30 candle matters more than 9:45 or 10:00",
+    "body": "We chose the 9:30–10:00 candle as the OR for one reason: it captures the FULL initial reaction to the cash open. By 10:00, the range is mature — the impulse has either spent itself (continuation) or reversed (range-bound).\n\nA 5-minute or 15-minute OR captures only the first reaction wave. A 1-hour OR captures TOO much — the reaction is contaminated with second-leg moves.\n\n30 minutes is the Goldilocks window: enough time to define liquidity, not so much that the impulsive leg is over.",
+    "takeaway": "The OR window isn't arbitrary. It's the candle that bounds the day's first complete negotiation."
+  },
+  {
+    "title": "Stop-loss psychology — why $500 fixed beats 'tight stop'",
+    "body": "New traders love tight stops because losses feel small. The math hurts: a $100 stop with a $400 target sounds like 4R, but the win rate is much lower because price needs only a small wick to take you out.\n\nA $500 stop on NQ gives you 25 points of room — enough to absorb normal wick noise. A $100 stop gives you 5 points — you'll get stopped out by routine spread expansion.\n\nNOVA's $500 isn't 'big' — it's calibrated to the structure of the OR break. Wider stop = higher win rate. Higher win rate × 4R target = expectancy.",
+    "takeaway": "Tight stops feel safer but trade WORSE. Calibrate to the structure, not to your fear."
+  },
+  {
+    "title": "The 11:00 ET hard out — why we don't 'let it run'",
+    "body": "Some traders see a winning position at 10:55 ET and want to hold past 11:00 'just in case it keeps going.' We don't.\n\nReason: NOVA's edge is bounded by the NY AM session. Outside 9:30–11:00 ET, NQ liquidity drops, spreads widen, and the same setup that hit 80% inside the window only hits 53% outside.\n\nA winning position held past the bell becomes a different trade — one we don't have an edge on. Better to flat at the buzzer and start fresh tomorrow than to convert an 80%-edge trade into a 50%-edge trade.",
+    "takeaway": "The session window isn't a suggestion. It's the boundary of your statistical edge."
+  },
+  {
+    "title": "Funding cycles — when retail trades against itself",
+    "body": "Markets aren't always rational. Some windows are dominated by retail flow (post-newsletter, post-influencer-tweet, end-of-month rebalancing). In those windows, breakouts have lower follow-through because retail piles in late.\n\nNY AM 9:30-11:00 ET is institutional-dominated. Pension funds, prop desks, market makers. The footprints are clean — when liquidity gets taken, the move continues.\n\nYou'll see this empirically: NOVA's win rate on Mondays is similar to Wednesdays similar to Fridays. The participants are roughly the same caste of trader. That's why the edge is stable.",
+    "takeaway": "Your edge depends on WHO you're trading against, not just when."
+  },
+  {
+    "title": "Why we exit on active-SL touch, not target rejection",
+    "body": "Imagine your trade is at +$1,800 (close to TP). Price wicks up to $1,950 then pulls back to $1,650. Some traders panic-exit on the pullback.\n\nNOVA doesn't. The exit logic is: SL hit (or BE move, or trail move). If your trail is at $750 profit and price is now at $1,650, the trail hasn't been hit — the trade keeps running.\n\nThis prevents 'getting paid early' for a trade that would have continued to TP. The bracket is the bracket. Discipline = following it.",
+    "takeaway": "Exits aren't about feelings. They're about your written rules."
+  },
+  {
+    "title": "Pre-market swings — what they tell you",
+    "body": "Look at NQ from 7:00 ET to 9:30 ET. If the market has already swept the prior day's high overnight (or in pre-market), the 'easy liquidity' above is gone. The OR's high, when it forms, doesn't have stops above it to fuel a breakout.\n\nFlip side: if pre-market has been narrow and the prior day's high is intact, a long break from the OR has fuel to run.\n\nNOVA's pre-market post at 9:00 ET will mention this implicitly via the bias line. You can also chart it yourself.",
+    "takeaway": "Pre-market action sets the table. The OR is the meal."
+  },
+  {
+    "title": "The session-flat exit — why we never hold overnight on a day-trade strategy",
+    "body": "Holding NQ overnight on a day-trade setup is a different risk profile than the strategy was designed for. Globex (overnight session) liquidity is thin, news prints can hit pre-Asia open, and the original signal is no longer fresh.\n\nNOVA's 11:00 ET hard-out flatten enforces discipline: if your bracket didn't trigger by then, the trade is done. We don't 'see what happens overnight.'\n\nThe one exception: a winning position that's already locked-in at BE/Trail can theoretically run, but the algo still flats at 11:00 to keep the strategy clean.",
+    "takeaway": "Day-trade strategies should close intraday. Period."
+  },
+  {
+    "title": "Volatility regimes — calm vs spike days",
+    "body": "Not all days are equal. On low-vol days (Aug, late Dec, mid-summer), the OR may be only 30-40 points wide and breakouts hit TP slowly. On high-vol days (FOMC, NFP, post-earnings), the OR may be 100+ points and TPs hit in 15 minutes.\n\nNOVA's fixed $500 SL / $2000 TP doesn't change. But the EXPECTATION should: on low-vol days, expect the trade to take an hour to fill. On high-vol days, expect it in minutes.\n\nThis matters for emotional management. If you're staring at a slow trade on a low-vol day, that's normal. The math still works.",
+    "takeaway": "The strategy's parameters are fixed. Your patience must scale to the day's volatility."
+  },
+  {
+    "title": "The cost of the 18% — losing trades, framed correctly",
+    "body": "An 82% win rate strategy still loses 18% of its trades. Out of every 100 fires, ~18 are stop-outs. That's expected. That's IN THE MATH.\n\nNew subscribers panic on their first stop-out: 'is the algo broken?' No — it's working exactly as designed. The expectancy is +R AFTER absorbing those 18 losses.\n\nReframe: each $500 stop is a CONSEQUENCE of having an 82% win rate strategy. You can't have one without the other. The losses fund the next $2,000 win.",
+    "takeaway": "Losing trades aren't failure. They're the cost of the wins. Pay the rent without complaint."
+  },
+  {
+    "title": "Why NQ specifically — and not ES, YM, or RTY",
+    "body": "NQ (Nasdaq E-mini) leads on tech-heavy days, lags on rotation-into-value days, and has the cleanest opening-range structure of the four major equity index futures.\n\nES is too broad — its OR is more diffuse. YM is too narrow — its participants are more institutional and slower. RTY is too volatile — its OR sweeps too often and the win rate craters.\n\nWe tested all four. NQ won on edge, on liquidity, and on consistency. The strategy was built around NQ's specific personality.",
+    "takeaway": "Edge is product-specific. Don't port a strategy across instruments without retesting."
+  },
+  {
+    "title": "Friday close behavior — why we don't widen risk for 'last-day-of-week' trades",
+    "body": "Some traders give themselves Friday-only liberties: 'I'll let this trade run since it's Friday.' That's a great way to give back the week.\n\nNOVA's Friday is exactly the same as Monday: 9:30-11:00 ET window, $500 SL, $2,000 TP, hard out at 11. The strategy doesn't care about the weekend.\n\nWhat IS different on Friday: macro releases tend to be backward-looking (employment data, manufacturing surveys), so the morning often has cleaner directional follow-through. But the algo handles that automatically.",
+    "takeaway": "Consistency across the week is the strategy. Don't editorialize Friday into something different."
+  },
+  {
+    "title": "When NOVA disagrees with your read — trust the algo",
+    "body": "You'll have days where you 'feel' bullish and NOVA fires a short. Or vice versa.\n\nThis happens because your bias is informed by overnight news, your sleep, your last trade, your favorite YouTuber. NOVA's read is informed by: where price closed yesterday, where the 9:30 candle prints, and which side of the OR price ticks first.\n\nThe algo is unemotional. You're not. When they disagree, the algo wins — its 82% rate is its credentials.",
+    "takeaway": "Your gut is a heuristic, not data. The algo's track record is data. Bet on data."
   }
 ]
