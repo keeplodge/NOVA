@@ -41,9 +41,11 @@ EST = timezone(timedelta(hours=-4))  # EDT default; flips with system tz
 
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True
 intents.reactions = True
 intents.message_content = False  # not required for our handlers
+# intents.members requires "Server Members Intent" toggle in Discord Developer
+# Portal. Off by default — turn ON if you want welcome DMs to fire on join.
+intents.members = os.environ.get("DISCORD_MEMBERS_INTENT", "0") == "1"
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -280,7 +282,6 @@ async def _ensure_verify_message(guild: discord.Guild):
             "🟠 **Auto** — $297/mo, auto-routed via TradersPost\n"
             "🟦 **Fleet** — $997/mo, the inner circle\n"
         ),
-        footer=None,
     )
     embed.set_footer(text="NOVA Algo · self-serve verify")
     msg = await ch.send(embed=embed)
@@ -616,39 +617,44 @@ async def cmd_halt(interaction: discord.Interaction):
 
 @tree.command(
     name="streak",
-    description="Cohort consecutive winning trade-day streak.",
+    description="Your personal + cohort consecutive winning trade-day streak.",
     guild=discord.Object(id=GUILD_ID),
 )
 async def cmd_streak(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True, ephemeral=False)
-    s = _http_get_json(f"{SITE_BASE}/api/stats/streak")
-    if not s or not s.get("ok"):
-        # Fallback: derive from /api/stats/live live trades if no dedicated endpoint
-        live = _http_get_json(f"{SITE_BASE}/api/stats/live") or {}
-        l = (live or {}).get("live", {})
-        wins = l.get("wins", 0)
-        losses = l.get("losses", 0)
-        streak = wins if losses == 0 else 0
-        embed = discord.Embed(
-            title=f"🔥 Cohort streak · {streak}",
-            color=0xFBBF24,
-            description=(
-                f"Approximate from live forward: **{streak}** consecutive wins, "
-                f"no losses logged yet."
-            ),
-        )
-        await interaction.followup.send(embed=embed)
-        return
-    streak = s.get("streak", 0)
+    discord_id = str(interaction.user.id)
+
+    cohort = _http_get_json(f"{SITE_BASE}/api/stats/streak") or {}
+    me = _http_get_json(f"{SITE_BASE}/api/me/streak?discordId={urllib.parse.quote(discord_id)}") or {}
+
+    cohort_streak = cohort.get("streak", 0) if cohort.get("ok") else 0
+    me_streak = me.get("streak", 0) if me.get("ok") else 0
+
     embed = discord.Embed(
-        title=f"🔥 Cohort streak · {streak}",
-        color=0xFBBF24 if streak > 0 else 0x6B7280,
-        description=f"**{streak}** consecutive winning trade-days across the live cohort.",
+        title="🔥 Streak counter",
+        color=0xFBBF24 if (cohort_streak > 0 or me_streak > 0) else 0x6B7280,
     )
-    if s.get("longest_ever"):
-        embed.add_field(name="Longest ever", value=str(s["longest_ever"]), inline=True)
-    if s.get("started_on"):
-        embed.add_field(name="Started", value=s["started_on"], inline=True)
+    embed.add_field(
+        name="Your streak",
+        value=(f"**{me_streak}** consecutive winning trade-days"
+               + (f" · started {me.get('started_on')}" if me.get('started_on') else "")
+               if me.get("ok") else "Not connected — link your TradersPost webhook to track."),
+        inline=False,
+    )
+    embed.add_field(
+        name="Cohort streak",
+        value=f"**{cohort_streak}** consecutive winning trade-days across the cohort"
+              + (f" · started {cohort.get('started_on')}" if cohort.get('started_on') else ""),
+        inline=False,
+    )
+    if me.get("longest_ever") or cohort.get("longest_ever"):
+        bits = []
+        if me.get("longest_ever"):
+            bits.append(f"yours: {me['longest_ever']}")
+        if cohort.get("longest_ever"):
+            bits.append(f"cohort: {cohort['longest_ever']}")
+        embed.add_field(name="Longest ever", value=" · ".join(bits), inline=False)
+    embed.set_footer(text="NOVA Algo · /streak")
     await interaction.followup.send(embed=embed)
 
 
@@ -866,6 +872,64 @@ async def _post_coffee_chat():
         print(f"[bot] coffee-chat post failed: {e}", flush=True)
 
 
+# ── Bias-poll auto-tally (11:00 ET when session closes) ─────────────────────
+
+async def _post_bias_poll_tally():
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    ch = discord.utils.get(guild.text_channels, name="pre-market")
+    if not ch:
+        return
+    today = datetime.now(EST).strftime("%Y-%m-%d")
+    state = _load_json(BIAS_POLL_PATH, {})
+    day = state.get(today)
+    if not day:
+        return  # no votes recorded today, silent skip
+    long_n = len(day.get("long", []))
+    short_n = len(day.get("short", []))
+    notrade_n = len(day.get("no_trade", []))
+    total = long_n + short_n + notrade_n
+    if total == 0:
+        return
+
+    # Pull today's actual outcome from Railway state
+    railway_status = _http_get_json(f"{API_BASE}/status") or {}
+    trades_today = railway_status.get("trades_today", 0)
+
+    def _pct(n: int) -> str:
+        return f"{(n/total*100):.0f}%" if total else "—"
+
+    embed = discord.Embed(
+        title=f"📊 Daily bias poll · tally · {today}",
+        color=0xFBBF24,
+        description=f"**{total}** votes cast this morning.",
+    )
+    embed.add_field(
+        name="🟢 Long",
+        value=f"{long_n}  ·  {_pct(long_n)}",
+        inline=True,
+    )
+    embed.add_field(
+        name="🔴 Short",
+        value=f"{short_n}  ·  {_pct(short_n)}",
+        inline=True,
+    )
+    embed.add_field(
+        name="🟡 No-trade",
+        value=f"{notrade_n}  ·  {_pct(notrade_n)}",
+        inline=True,
+    )
+    embed.add_field(
+        name="What actually happened",
+        value=(f"NOVA fired **{trades_today}** trade(s) today." if trades_today
+               else "**No fire today** — price stayed inside the OR. ~30% of NY AM days resolve this way."),
+        inline=False,
+    )
+    embed.set_footer(text="NOVA Algo · daily bias tally · NY AM ORB")
+    await ch.send(embed=embed)
+
+
 # ── Friday weekly leaderboard + sentiment poll ──────────────────────────────
 
 class SentimentView(discord.ui.View):
@@ -1008,6 +1072,10 @@ async def scheduler_loop():
     # Daily 23:00 ET — trivia reveal
     if _should_fire("trivia_reveal", now, None, 23, 0):
         await _reveal_trivia()
+
+    # Daily 11:00 ET — bias poll tally (after session closes)
+    if _should_fire("bias_tally", now, (0, 1, 2, 3, 4), 11, 0):
+        await _post_bias_poll_tally()
 
     # Friday 16:30 ET — weekly leaderboard + sentiment poll
     if _should_fire("friday_lb", now, (4,), 16, 30):
