@@ -132,6 +132,7 @@ state = {
     "last_signal":     None,   # {"action", "price", "session", "ticker"}
     "last_signals":    [],     # ring buffer of last SIGNAL_RING_CAP signals (newest first)
     "open_positions":  {},     # keyed by ticker → full signal dict at entry
+    "manual_halt":     False,  # /admin/halt sets True; auto-clears on date rollover
 }
 
 
@@ -169,6 +170,7 @@ def reset_daily_state_if_new_day():
         state["trades_today"]   = 0
         state["daily_loss"]     = 0.0
         state["session_trades"] = {s: 0 for s in SESSIONS}
+        state["manual_halt"]    = False  # auto-clear on day rollover
         # open_positions is intentionally NOT reset on day rollover — a position
         # held across a day boundary (rare but possible) should survive. It's
         # cleared only by /close, /report-result, or an explicit admin call.
@@ -558,6 +560,8 @@ def evaluate_gates(ticker: str, grade: str | None, now: datetime) -> tuple[bool,
         return False, f"Rejected — daily trade limit of {MAX_TRADES_PER_DAY} reached", gate_state
     if state["daily_loss"] >= MAX_DAILY_LOSS:
         return False, f"Rejected — daily loss limit of ${MAX_DAILY_LOSS:.2f} reached", gate_state
+    if state.get("manual_halt"):
+        return False, "Rejected — pipeline manually halted by staff", gate_state
     if norm in state["open_positions"]:
         return False, f"Rejected — position already open for {norm}", gate_state
 
@@ -597,8 +601,63 @@ def _handle_exit_signal(data: dict, now):
         logger.warning(f"[fanout-exit] unhandled error: {fanout_err}")
         fanout_result = {"fanned_to": 0, "ok": 0, "fail": 0, "details": []}
 
+    # Capture entry context BEFORE popping state — needed for #trade-journal post.
+    open_position = state["open_positions"].get(ticker)
+
     # Clear Railway state — kills the ghost position tracker
     state["open_positions"].pop(ticker, None)
+
+    # Auto post-mortem to #trade-journal (best-effort; never fails the exit path).
+    if discord_bridge:
+        try:
+            entry_price = float((open_position or {}).get("price", 0) or 0)
+            exit_price  = float(data.get("price", 0) or 0)
+            opened_at   = (open_position or {}).get("opened_at")
+            side        = ((open_position or {}).get("action") or "").lower()
+            is_long     = side in ("buy", "long")
+
+            # Parse exit reason from Pine comment, e.g. "NY_AM_ORB_TrailExit"
+            reason = "Close"
+            if "TrailExit" in comment: reason = "TrailExit"
+            elif "BEExit" in comment:  reason = "BEExit"
+            elif "SLExit" in comment:  reason = "SL"
+            elif "TP"     in comment:  reason = "TP"
+            elif "Session" in comment: reason = "SessionFlat"
+
+            # NQ contract = $20/pt for the mini, $2/pt for the micro. Default to mini.
+            point_value = 20.0
+            if entry_price and exit_price:
+                pts = (exit_price - entry_price) if is_long else (entry_price - exit_price)
+                usd_pnl = pts * point_value
+                # SL is $500 by canonical strategy → R = pnl / 500
+                r_multiple = usd_pnl / 500.0
+            else:
+                usd_pnl = 0.0
+                r_multiple = 0.0
+
+            hold_min = None
+            if opened_at:
+                try:
+                    opened_dt = datetime.fromisoformat(opened_at)
+                    delta = now - opened_dt
+                    hold_min = int(delta.total_seconds() // 60)
+                except Exception:
+                    hold_min = None
+
+            discord_bridge.post_trade_journal({
+                "ticker":      ticker,
+                "side":        side or ("buy" if is_long else "sell"),
+                "entry":       entry_price,
+                "exit":        exit_price,
+                "exit_reason": reason,
+                "r_multiple":  r_multiple,
+                "usd_pnl":     usd_pnl,
+                "hold_min":    hold_min,
+                "opened_at":   opened_at,
+                "closed_at":   now.isoformat(),
+            })
+        except Exception as journal_err:
+            logger.warning(f"[trade-journal] post failed: {journal_err}")
 
     return jsonify({
         "status":     "exit_executed",
@@ -782,6 +841,28 @@ def webhook():
             "fail":      fanout_result["fail"],
         },
     }
+
+    # Mirror to #signal-audit (staff). Best-effort; never fails the webhook.
+    if discord_bridge:
+        try:
+            discord_bridge.post_signal_audit(
+                payload=data,
+                gates={
+                    "session": session,
+                    "trades_today": state["trades_today"],
+                    "daily_loss": state["daily_loss"],
+                    "result": result.status,
+                },
+                dispatch_result={
+                    "primary_ok": result.dispatch.chosen if result.dispatch else None,
+                    "fanned_to":  fanout_result["fanned_to"],
+                    "ok":         fanout_result["ok"],
+                    "fail":       fanout_result["fail"],
+                },
+            )
+        except Exception as audit_err:
+            logger.warning(f"[signal-audit] post failed: {audit_err}")
+
     return jsonify(response), 200
 
 
@@ -1211,13 +1292,21 @@ def discord_equity_post():
 
 @app.route("/discord/eod/post", methods=["POST"])
 def discord_eod_post():
-    """Push EOD recap to #eod-recap. Cron at 16:30 ET."""
+    """Push rich EOD recap to #eod-recap. Cron weekdays 11:05 ET."""
     if not discord_bridge:
         return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
     authed, reason = _webhook_auth_ok(request)
     if not authed:
         return jsonify({"status": "unauthorized", "message": reason}), 401
     body = request.get_json(silent=True) or {}
+
+    today_prefix = datetime.now(EST).strftime("%Y-%m-%d")
+    today_signals = [
+        s for s in state["last_signals"]
+        if (s.get("recorded_at") or "")[:10] == today_prefix
+    ]
+    last_signal = today_signals[0] if today_signals else None
+
     ok = discord_bridge.post_eod_recap(
         trades_today=int(body.get("trades_today", state["trades_today"])),
         wins=int(body.get("wins", 0)),
@@ -1225,6 +1314,10 @@ def discord_eod_post():
         breakeven=int(body.get("breakeven", 0)),
         day_pnl=float(body.get("day_pnl", -state["daily_loss"])),
         notes=body.get("notes"),
+        last_signal=body.get("last_signal", last_signal),
+        equity=body.get("equity", build_equity_data()),
+        open_positions=body.get("open_positions", state["open_positions"]),
+        pipeline_note=body.get("pipeline_note"),
     )
     return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
 
@@ -1245,6 +1338,384 @@ def discord_morning_post():
         notes=body.get("notes"),
     )
     return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+def _compute_nq_levels() -> dict:
+    """Pull NQ=F daily candles via yfinance and derive PDH/PDL/weekly-open/etc."""
+    import yfinance as yf
+    try:
+        hist = yf.Ticker("NQ=F").history(period="14d", interval="1d")
+        if hist is None or hist.empty:
+            return {}
+        rows = hist.tail(10)
+        last = rows.iloc[-1]
+        prior = rows.iloc[-2] if len(rows) >= 2 else None
+        last_5 = rows.tail(5)
+
+        # Weekly open: most recent Monday's open (or Sunday 6pm bar — yfinance daily dates Monday)
+        weekly_open = None
+        for ts, row in rows.iterrows():
+            if ts.weekday() == 0:  # Monday
+                weekly_open = float(row["Open"])
+        prior_week = rows.iloc[-7:-2] if len(rows) >= 7 else None
+
+        out = {
+            "as_of": datetime.now(EST).strftime("%a %b %d, %Y"),
+            "symbol": "NQ1!",
+            "current": float(last["Close"]),
+            "pdh": float(prior["High"]) if prior is not None else None,
+            "pdl": float(prior["Low"]) if prior is not None else None,
+            "weekly_open": weekly_open,
+            "session_h_5d": float(last_5["High"].max()) if not last_5.empty else None,
+            "session_l_5d": float(last_5["Low"].min()) if not last_5.empty else None,
+        }
+        if prior_week is not None and not prior_week.empty:
+            out["prior_week_h"] = float(prior_week["High"].max())
+            out["prior_week_l"] = float(prior_week["Low"].min())
+        # Estimated OR width from rolling 20d (high - low avg, scaled to a typical 30m span)
+        try:
+            full = yf.Ticker("NQ=F").history(period="40d", interval="1d")
+            daily_range = (full["High"] - full["Low"]).tail(20).mean()
+            out["expected_or_width"] = float(daily_range) * 0.18  # ~18% of full daily range
+        except Exception:
+            out["expected_or_width"] = None
+        return out
+    except Exception as e:
+        logger.warning(f"[key-levels] yfinance fetch failed: {e}")
+        return {}
+
+
+def _fetch_macro_events_today() -> list[dict]:
+    """Pull today's high-impact USD macro events from ForexFactory's free JSON."""
+    try:
+        r = requests.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            timeout=6.0,
+            headers={"User-Agent": "NOVA-Algo-Bot/1.0"},
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        today_iso = datetime.now(EST).strftime("%Y-%m-%d")
+        events = []
+        for ev in data:
+            ts = ev.get("date") or ""
+            if not ts.startswith(today_iso):
+                continue
+            currency = (ev.get("country") or ev.get("currency") or "").upper()
+            if currency not in ("USD", ""):
+                continue
+            impact = (ev.get("impact") or "").lower()
+            time_part = ts[11:16] if len(ts) >= 16 else "—"
+            events.append({
+                "time": f"{time_part} ET",
+                "title": ev.get("title", "Event"),
+                "currency": currency or "USD",
+                "impact": impact,
+                "forecast": ev.get("forecast") or None,
+                "previous": ev.get("previous") or None,
+            })
+        # high impact first, then by time
+        events.sort(key=lambda e: (0 if e["impact"] == "high" else (1 if e["impact"] == "medium" else 2), e["time"]))
+        return events
+    except Exception as e:
+        logger.warning(f"[news-feed] macro fetch failed: {e}")
+        return []
+
+
+@app.route("/discord/key-levels/post", methods=["POST"])
+def discord_key_levels_post():
+    """Push #key-levels daily card. Cron 7:30 ET weekdays."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    levels = _compute_nq_levels()
+    if not levels:
+        return jsonify({"status": "skipped", "reason": "no-data"}), 200
+    ok = discord_bridge.post_key_levels(levels)
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok), "levels": levels}), 200
+
+
+@app.route("/discord/news-feed/post", methods=["POST"])
+def discord_news_feed_post():
+    """Push #news-feed daily macro card. Cron 7:00 ET weekdays."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    events = _fetch_macro_events_today()
+    ok = discord_bridge.post_news_feed(events)
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok), "count": len(events)}), 200
+
+
+@app.route("/discord/pre-market/post", methods=["POST"])
+def discord_pre_market_post():
+    """Push #pre-market 9:00 ET snapshot."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    levels = _compute_nq_levels()
+    events = _fetch_macro_events_today()
+    next_event = next(
+        (e for e in events if e["impact"] == "high"),
+        events[0] if events else None,
+    )
+    snapshot = {
+        "as_of": datetime.now(EST).strftime("%a %b %d, %I:%M %p ET").replace(" 0", " "),
+        "current": levels.get("current"),
+        "pdh": levels.get("pdh"),
+        "pdl": levels.get("pdl"),
+        "weekly_open": levels.get("weekly_open"),
+        "news_count": len(events),
+        "next_event": next_event,
+        "expected_or_width": levels.get("expected_or_width"),
+    }
+    ok = discord_bridge.post_pre_market(snapshot)
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+@app.route("/discord/trade-journal/post", methods=["POST"])
+def discord_trade_journal_post():
+    """Receive a close event payload and post to #trade-journal."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    if not body.get("ticker"):
+        return jsonify({"status": "bad-request", "message": "ticker required"}), 400
+    ok = discord_bridge.post_trade_journal(body)
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+@app.route("/discord/status/heartbeat", methods=["POST"])
+def discord_status_heartbeat():
+    """Hourly Railway heartbeat → #status."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    now = datetime.now(tz=EST)
+    session = get_current_session(now) or "None"
+    sub_count = 0
+    try:
+        from subscriber_fanout import _fetch_subscribers
+        sub_count = len(_fetch_subscribers() or [])
+    except Exception:
+        sub_count = 0
+    snapshot = {
+        "active_session":  session,
+        "trades_today":    state["trades_today"],
+        "daily_loss":      state["daily_loss"],
+        "loss_limit":      MAX_DAILY_LOSS,
+        "open_positions":  state["open_positions"],
+        "approved_subscribers": sub_count,
+    }
+    ok = discord_bridge.post_status_heartbeat(snapshot)
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+@app.route("/discord/stats-dashboard/post", methods=["POST"])
+def discord_stats_dashboard_post():
+    """Nightly merged stats → #stats-dashboard. Body may pass merged stats; if not, we fetch."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    stats = body.get("merged") or body.get("stats")
+    if not stats:
+        try:
+            r = requests.get("https://novaalgo.org/api/stats/live", timeout=6)
+            data = r.json() if r.status_code == 200 else {}
+            stats = data.get("merged") or {}
+        except Exception as e:
+            logger.warning(f"[stats-dashboard] fetch failed: {e}")
+            stats = {}
+    if not stats:
+        return jsonify({"status": "skipped", "reason": "no-stats"}), 200
+    ok = discord_bridge.post_stats_dashboard(stats)
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+def _fetch_macro_events_week() -> list[dict]:
+    """Pull this-week high+medium impact USD events from ForexFactory."""
+    try:
+        r = requests.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            timeout=6.0,
+            headers={"User-Agent": "NOVA-Algo-Bot/1.0"},
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        events = []
+        for ev in data:
+            ts = ev.get("date") or ""
+            currency = (ev.get("country") or ev.get("currency") or "").upper()
+            if currency not in ("USD", ""):
+                continue
+            impact = (ev.get("impact") or "").lower()
+            if impact not in ("high", "medium"):
+                continue
+            time_part = ts[11:16] if len(ts) >= 16 else "—"
+            date_part = ts[:10] if len(ts) >= 10 else "this week"
+            try:
+                day_label = datetime.fromisoformat(ts).strftime("%a · %b %d") if ts else date_part
+            except Exception:
+                day_label = date_part
+            events.append({
+                "date":  day_label,
+                "time":  f"{time_part} ET",
+                "title": ev.get("title", "Event"),
+                "currency": currency or "USD",
+                "impact": impact,
+                "forecast": ev.get("forecast") or None,
+                "previous": ev.get("previous") or None,
+            })
+        events.sort(key=lambda e: (e["date"], 0 if e["impact"] == "high" else 1, e["time"]))
+        return events
+    except Exception as e:
+        logger.warning(f"[economic-calendar] fetch failed: {e}")
+        return []
+
+
+@app.route("/admin/halt", methods=["POST"])
+def admin_halt():
+    """Manually halt fanout for the rest of the session. Cleared at next day rollover."""
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    state["manual_halt"] = True
+    logger.warning("[admin] pipeline manually halted")
+    if discord_bridge:
+        try:
+            discord_bridge.post_status(
+                "🛑 NOVA pipeline manually halted",
+                level="warn",
+                fields=[{"name": "Auto-clears", "value": "Next day rollover (00:00 ET)", "inline": True}],
+            )
+        except Exception:
+            pass
+    return jsonify({"status": "halted", "manual_halt": True}), 200
+
+
+@app.route("/admin/unhalt", methods=["POST"])
+def admin_unhalt():
+    """Clear the manual halt early."""
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    state["manual_halt"] = False
+    logger.info("[admin] manual halt cleared")
+    return jsonify({"status": "unhalted", "manual_halt": False}), 200
+
+
+CONCEPT_BANK_PATH = os.path.join(os.path.dirname(__file__), "nova-algo-discord", "content", "concepts.json")
+CONCEPT_CURSOR_PATH = os.path.join(os.path.dirname(__file__), ".concept_cursor.json")
+
+
+def _next_concept() -> dict | None:
+    """Pick the next concept from the rotation file. Cursor advances each call."""
+    try:
+        with open(CONCEPT_BANK_PATH, "r", encoding="utf-8") as f:
+            bank = json.load(f)
+    except Exception as e:
+        logger.warning(f"[concept] bank load failed: {e}")
+        return None
+    if not bank:
+        return None
+    try:
+        with open(CONCEPT_CURSOR_PATH, "r", encoding="utf-8") as f:
+            cursor = int(json.load(f).get("idx", 0))
+    except Exception:
+        cursor = 0
+    pick = bank[cursor % len(bank)]
+    try:
+        with open(CONCEPT_CURSOR_PATH, "w", encoding="utf-8") as f:
+            json.dump({"idx": (cursor + 1) % len(bank)}, f)
+    except Exception:
+        pass
+    return pick
+
+
+@app.route("/discord/concept/post", methods=["POST"])
+def discord_concept_post():
+    """Weekly concept-of-the-week post → #concept-of-the-week.
+
+    With a body: posts the supplied title/body.
+    Empty body: pulls the next concept from content/concepts.json rotation.
+    """
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    title = body.get("title")
+    content = body.get("body") or body.get("content")
+    takeaway = body.get("takeaway")
+
+    if not title or not content:
+        # Fall back to the rotation
+        c = _next_concept()
+        if not c:
+            return jsonify({"status": "skipped", "reason": "no-concepts-available"}), 200
+        title = c.get("title")
+        content = c.get("body")
+        takeaway = c.get("takeaway") or takeaway
+
+    ok = discord_bridge.post_concept_of_the_week(
+        title=title,
+        body=content,
+        takeaway=takeaway,
+        week_label=body.get("week_label"),
+    )
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+@app.route("/discord/milestones/post", methods=["POST"])
+def discord_milestones_post():
+    """Event-triggered milestone post → #milestones."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    kind = body.get("kind", "milestone")
+    title = body.get("title")
+    if not title:
+        return jsonify({"status": "bad-request", "message": "title required"}), 400
+    ok = discord_bridge.post_milestone(
+        kind=kind,
+        title=title,
+        body=body.get("body", ""),
+        color=body.get("color"),
+    )
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
+
+
+@app.route("/discord/economic-calendar/post", methods=["POST"])
+def discord_economic_calendar_post():
+    """Weekly macro digest → #economic-calendar. Sunday 6pm ET via cron."""
+    if not discord_bridge:
+        return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    events = _fetch_macro_events_week()
+    week_label = datetime.now(EST).strftime("Week of %b %d, %Y")
+    ok = discord_bridge.post_economic_calendar(events, week_label=week_label)
+    return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok), "count": len(events)}), 200
 
 
 @app.route("/signals/recent", methods=["GET"])

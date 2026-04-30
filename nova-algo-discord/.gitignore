@@ -1,0 +1,14 @@
+.env
+*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+WEBHOOK_URLS.md
+
+# Runtime state — generated, not source
+.bot_state/
+.verify_message.json
+.concept_cursor.json
+logs/
+debug_*.png

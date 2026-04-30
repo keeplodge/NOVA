@@ -1,0 +1,62 @@
+[
+  {
+    "title": "The Opening Range as a liquidity map",
+    "body": "The first 30 minutes after the bell isn't random. It's the day's first negotiation between buyers and sellers — and the high and low it prints become the day's reference liquidity. Above that range, longs are in control. Below, shorts. Inside, nobody's won yet.\n\nNOVA waits for the negotiation to resolve. We don't predict — we react to the first side that takes control past the boundary.",
+    "takeaway": "The OR isn't a level to fade. It's a battle line. Trade with the winner, never against."
+  },
+  {
+    "title": "Why a tick-break beats a candle close",
+    "body": "There's an old debate in breakout trading: do you enter on the tick or wait for the candle to close beyond the level?\n\nNOVA enters on the tick. Here's why: by the time a 30m candle closes beyond the OR, the impulsive leg is half over. Stop-entries at OR_high+1tick / OR_low−1tick catch the move at its inception. The fixed $500 SL still brackets the trade — a fakeout just stops out fast, and the day is done.\n\nClose-confirmation feels safer because it filters chop. But it costs R on every real breakout.",
+    "takeaway": "Speed beats certainty. The market pays you for being early to the impulsive leg, not for being right about the candle close."
+  },
+  {
+    "title": "Liquidity sweeps — what's actually happening when price wicks a level",
+    "body": "When you see a wick that pierces a prior swing high then immediately reverses, you're watching institutional capture. The high is where retail stops cluster. Big money pushes price up to harvest those stops, then turns around — they wanted to BUY the dip, and they used your stop as their fill.\n\nThis is the 'turtle soup' / 'liquidity grab' pattern.\n\nFor NOVA, this is why we don't enter on the wick that pokes the OR — we enter on the tick that breaks AND HOLDS. If price wicks OR_high then collapses below, the buy-stop never triggers. The strategy's structure protects us from the sweep.",
+    "takeaway": "A wick is a signal that smart money just took retail liquidity. Trade with the post-wick direction, not against it."
+  },
+  {
+    "title": "Why NOVA only trades NY AM",
+    "body": "NQ liquidity peaks 9:30–11:00 ET. After 11:00 ET, NY lunch begins, and spreads widen, volume thins, and breakouts fakeout more often. After 1:00 ET, the European session is closed, leaving thin US-only liquidity until close.\n\nThe same ORB setup outside NY AM gives:\n• Wider slippage on entry\n• More wick-and-fade fakeouts\n• Lower hit rate (we tested it — 53% vs 82%)\n\nWe trade the window with the cleanest data and walk away from the rest.",
+    "takeaway": "Edge isn't just the setup — it's the timing window where the setup actually works."
+  },
+  {
+    "title": "Fixed R: why we never scale or martingale",
+    "body": "The biggest killer of prop accounts isn't bad setups — it's good setups, sized too big after losses.\n\n'I lost $500 on the last trade, so this one I'll do 2 contracts to make it back' is the path to a blown account. Variance is normal — even a 80% win-rate strategy will have 4-loss streaks.\n\nNOVA risks $500 every trade, period. The expectancy math (4R target × 80% hit) only works when each trade is sized identically. Scaling breaks the math. Adding to losers breaks the math.",
+    "takeaway": "If your size changes based on emotion, you don't have a strategy. You have a casino."
+  },
+  {
+    "title": "Break of Structure (BOS) vs Change of Character (CHoCH)",
+    "body": "Two key concepts from price-action / ICT literature:\n\n**BOS** — price closes beyond a prior swing high (in an uptrend) or low (downtrend). Confirms continuation. The trend is intact.\n\n**CHoCH** — price closes beyond the most recent counter-trend swing point. This is the FIRST sign of a possible reversal. The character of the move has changed.\n\nWhy it matters for ORB: if NOVA fires LONG at OR_high+1tick and price subsequently CHoCHes below the swing low INSIDE the trade, that's an early warning. Some traders flatten manually. NOVA doesn't — we let the bracket handle it.",
+    "takeaway": "BOS confirms. CHoCH warns. Knowing which you're looking at is the difference between holding and exiting."
+  },
+  {
+    "title": "Why we use a 30m timeframe (not 5m, not 1H)",
+    "body": "On 5m: too noisy. Every wick triggers, half the trades are fakeouts, win-rate craters.\n\nOn 1H: too slow. The OR is over by the time the candle closes — we miss the impulsive leg entirely.\n\n30m is the sweet spot for NQ NY AM ORB:\n• One clean 30m candle = exactly the OR (9:30–10:00)\n• Triggers arm at 10:00 with a full 60 minutes of session left to play out\n• Price action is denoised vs 5m but still timely vs 1H\n\nWe didn't pick 30m because it sounded good. We backtested every TF from 5m to 4H. 30m won by a wide margin.",
+    "takeaway": "Timeframe selection is part of the edge. Test, don't assume."
+  },
+  {
+    "title": "Prop firm trailing drawdowns — the silent account-killer",
+    "body": "Apex / Lucid / Topstep all run TRAILING drawdowns. That means your max-loss line moves up with your equity peak. Hit a high water mark, then give back too much, and the account is blown — even if you're still profitable for the day.\n\nThe trap: many strategies have ~50% win rate but big winners that pad equity, then take wide stops that grind down. The peak-to-trough drawdown wipes you out before the next big winner.\n\nNOVA's $500 SL / $2,000 TP fixed risk is purpose-built for this. Drawdowns are bounded. Equity grows in clean steps. The trailing line stays comfortably below your floor.",
+    "takeaway": "Prop accounts aren't just about win rate. They're about how peak-to-trough volatility interacts with the trailing line."
+  },
+  {
+    "title": "PDH / PDL — yesterday's high and low as today's reference",
+    "body": "Prior Day High and Prior Day Low are two of the most-watched levels in futures. Why? Because every market participant who held overnight is anchored to them.\n\nTraders who longed yesterday have stops below PDL. Traders who shorted have stops above PDH. The day's first directional move is often a sweep of one of these — capturing overnight stops before the real move starts.\n\nFor NOVA: if today's OR_high is BELOW yesterday's PDH, a long breakout has natural fuel toward PDH. If OR_high is ABOVE PDH, the breakout is into clean air. Both are tradable, but the former tends to be more impulsive.",
+    "takeaway": "Levels aren't lines on a chart. They're collections of stop orders. Trade with them, not against them."
+  },
+  {
+    "title": "Fair Value Gaps (FVGs) — the imbalance footprint",
+    "body": "An FVG is a 3-candle pattern where the middle candle's range never overlaps with the wicks of the outer two. It's a footprint of an imbalance — price moved so fast that a price range was skipped over.\n\nFVGs often act as magnets: price returns to fill the gap before continuing in the original direction. They're not entry signals on their own — they're CONTEXT.\n\nFor NOVA: if a long fires and there's an unfilled FVG above (created during pre-market), that's added fuel. The market wants to fill the gap, and your trade is going in that direction.",
+    "takeaway": "FVGs aren't signals. They're targets. Read them as where price is being pulled, not as an entry trigger."
+  },
+  {
+    "title": "Macro prints inside the trade window — what to do",
+    "body": "Most days, no high-impact USD print lands inside 9:30–11:00 ET. But sometimes ISM Manufacturing or a Fed speaker hits at 10:00 ET — exactly when NOVA's triggers arm.\n\nThe naive read: 'pause the algo on print days.'\n\nThe disciplined read: NOVA's stop is $500. A vol-spike that whipsaws past OR_high then collapses just stops the trade out fast. The fixed-bracket structure absorbs the impact. We don't predict whether the print will be hawkish or dovish — we let the algo react.\n\n#news-feed posts every morning so you know what's coming. Plan around it, but trust the structure.",
+    "takeaway": "A fixed-risk algo doesn't fear macro prints. It just trades the reaction with bounded loss."
+  },
+  {
+    "title": "The 'no-fire day' — why ~30% of days resolve no-trade",
+    "body": "On about 3 in 10 NY AM sessions, price stays inside the Opening Range from 9:30 to 11:00 ET. No breakout. No trigger. No trade.\n\nThis is a feature, not a bug. The setup is conditional — it requires a clean break to fire. Range-bound days lack the impulse the strategy needs. Forcing a trade into chop is how 80% win rates become 60% win rates.\n\nNOVA's discipline: zero is a position. The best trade some days is the one we don't take. The cohort doesn't lose money on no-fire days. We just wait.",
+    "takeaway": "Patience is part of the strategy. The setup not appearing IS the setup not appearing."
+  }
+]
