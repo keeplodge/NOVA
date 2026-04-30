@@ -60,6 +60,7 @@ TRIVIA_LB_PATH = os.path.join(STATE_DIR, "trivia_leaderboard.json")
 TRIVIA_OPEN_PATH = os.path.join(STATE_DIR, "trivia_open.json")
 WIN_PINNED_PATH = os.path.join(STATE_DIR, "win_pinned.json")
 BIAS_POLL_PATH = os.path.join(STATE_DIR, "bias_poll.json")
+DM_OPTOUT_PATH = os.path.join(STATE_DIR, "morningdm_optout.json")
 
 
 def _load_json(path: str, default):
@@ -916,6 +917,248 @@ async def _post_coffee_chat():
         print(f"[bot] coffee-chat post failed: {e}", flush=True)
 
 
+# ── /badge — public flex card ───────────────────────────────────────────────
+
+@tree.command(
+    name="badge",
+    description="Show your NOVA Algo badge — roles, streak, week R.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_badge(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=False)
+    discord_id = str(interaction.user.id)
+    member = interaction.user if isinstance(interaction.user, discord.Member) else None
+
+    # Fetch personal stats + streak + roles
+    stats = _http_get_json(f"{SITE_BASE}/api/me/stats?discordId={urllib.parse.quote(discord_id)}") or {}
+    streak = _http_get_json(f"{SITE_BASE}/api/me/streak?discordId={urllib.parse.quote(discord_id)}") or {}
+
+    badges: list[str] = []
+    if member and member.roles:
+        flex_roles = {
+            "Founder": "👑",
+            "Co-Founder": "🥇",
+            "Moderator": "🛡",
+            "Coach": "🎓",
+            "Fleet": "🌌",
+            "Auto": "🤖",
+            "Signal": "📡",
+            "Beta": "🌱",
+            "Verified": "✅",
+            "TradersPost Connected": "🔌",
+            "Funded": "💰",
+        }
+        for role in member.roles:
+            if role.name in flex_roles:
+                badges.append(f"{flex_roles[role.name]} {role.name}")
+
+    embed = discord.Embed(
+        title=f"🏷 {interaction.user.display_name}'s NOVA Algo badge",
+        color=0x00F5D4,
+    )
+    if badges:
+        embed.add_field(name="Roles", value="  ·  ".join(badges), inline=False)
+    else:
+        embed.add_field(name="Roles", value="No tier roles yet — run `/link` to connect.", inline=False)
+
+    me_streak = streak.get("streak", 0) if streak.get("ok") else 0
+    if stats.get("ok") and stats.get("trades", 0) > 0:
+        embed.add_field(
+            name="This week",
+            value=(
+                f"**{stats.get('trades',0)}** trades · "
+                f"**{stats.get('winRate',0):.0f}%** WR · "
+                f"**{stats.get('rSum',0):+.1f}R** · "
+                f"${stats.get('netUsd',0):+,.0f}"
+            ),
+            inline=False,
+        )
+    if me_streak > 0:
+        embed.add_field(name="🔥 Streak", value=f"**{me_streak}** consecutive winning days", inline=True)
+    embed.set_footer(text="NOVA Algo · /badge · share the flex")
+    if interaction.user.avatar:
+        embed.set_thumbnail(url=interaction.user.avatar.url)
+    await interaction.followup.send(embed=embed)
+
+
+# ── /trivia-leaderboard ─────────────────────────────────────────────────────
+
+@tree.command(
+    name="trivia-leaderboard",
+    description="Top 10 trivia scorers in NOVA Algo Discord.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_trivia_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False, ephemeral=False)
+    lb = _load_json(TRIVIA_LB_PATH, {})
+    if not lb:
+        await interaction.followup.send("No trivia answered yet. First question lands at 12:00 ET today.")
+        return
+    rows = sorted(lb.items(), key=lambda kv: int(kv[1] or 0), reverse=True)[:10]
+    medals = ["🥇", "🥈", "🥉"]
+    lines: list[str] = []
+    guild = interaction.guild
+    for i, (uid, points) in enumerate(rows):
+        medal = medals[i] if i < 3 else f"`#{i+1}`"
+        name = "trader"
+        if guild:
+            mem = guild.get_member(int(uid)) if uid.isdigit() else None
+            if mem:
+                name = mem.display_name
+        lines.append(f"{medal} **{name}** · {points} pts")
+    embed = discord.Embed(
+        title="🧠 Trivia leaderboard",
+        color=0xFBBF24,
+        description="\n".join(lines),
+    )
+    embed.set_footer(text="NOVA Algo · daily trivia · 12:00 ET in #strategy-talk")
+    await interaction.followup.send(embed=embed)
+
+
+# ── /concept-draft (staff) ──────────────────────────────────────────────────
+
+@tree.command(
+    name="concept-draft",
+    description="(Staff) Preview the next concept-of-the-week without posting.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_concept_draft(interaction: discord.Interaction):
+    if not _is_staff(interaction.user):
+        await interaction.response.send_message("Staff only.", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=False, ephemeral=True)
+    concepts_path = os.path.join(os.path.dirname(__file__), "content", "concepts.json")
+    cursor_path = os.path.join(STATE_DIR, "concept_preview_cursor.json")
+    try:
+        with open(concepts_path, "r", encoding="utf-8") as f:
+            bank = json.load(f)
+    except Exception:
+        await interaction.followup.send("concepts.json missing.", ephemeral=True)
+        return
+    if not bank:
+        await interaction.followup.send("Bank empty.", ephemeral=True)
+        return
+    cur = _load_json(cursor_path, {"idx": 0}).get("idx", 0)
+    pick = bank[cur % len(bank)]
+    embed = discord.Embed(
+        title=f"🧠 [PREVIEW] {pick['title']}",
+        color=0x00F5D4,
+        description=pick["body"][:3800],
+    )
+    if pick.get("takeaway"):
+        embed.add_field(name="🎯 Takeaway", value=pick["takeaway"], inline=False)
+    embed.set_footer(text=f"NOVA Algo · concept #{cur+1}/{len(bank)} · ephemeral preview only")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ── /morningdm-on / /morningdm-off ──────────────────────────────────────────
+
+@tree.command(
+    name="morningdm-on",
+    description="Opt IN to the daily NOVA Algo personal morning DM (7:30 ET).",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_morningdm_on(interaction: discord.Interaction):
+    optout = _load_json(DM_OPTOUT_PATH, [])
+    uid = str(interaction.user.id)
+    if uid in optout:
+        optout = [x for x in optout if x != uid]
+        _save_json(DM_OPTOUT_PATH, optout)
+    await interaction.response.send_message(
+        "✅ You're opted in. Daily morning DM lands ~7:30 ET weekdays. Disable with `/morningdm-off`.",
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="morningdm-off",
+    description="Opt OUT of the daily NOVA Algo personal morning DM.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_morningdm_off(interaction: discord.Interaction):
+    optout = _load_json(DM_OPTOUT_PATH, [])
+    uid = str(interaction.user.id)
+    if uid not in optout:
+        optout.append(uid)
+        _save_json(DM_OPTOUT_PATH, optout)
+    await interaction.response.send_message(
+        "🛑 You're opted out. Re-enable any time with `/morningdm-on`.",
+        ephemeral=True,
+    )
+
+
+# ── Daily personal DM (7:30 ET weekdays) ────────────────────────────────────
+
+async def _send_morning_dm_to_all():
+    """DM each linked + opted-in user their personal morning brief."""
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    optout = set(_load_json(DM_OPTOUT_PATH, []))
+
+    # Pull cohort streak once, share across DMs
+    cohort_streak = (_http_get_json(f"{SITE_BASE}/api/stats/streak") or {}).get("streak", 0)
+
+    # Get list of linked users from /api/cohort/linked-discord (we'll need to add this)
+    # For now: fall back to scanning members of the guild and checking each /api/me/stats
+    # to see if they're linked. Cheaper: only DM members with NOVA roles.
+    nova_role_names = {"Founder", "Co-Founder", "Fleet", "Auto", "Signal", "Beta", "Verified"}
+    candidates = [m for m in guild.members
+                  if not m.bot and any(r.name in nova_role_names for r in m.roles)
+                  and str(m.id) not in optout]
+    sent = 0
+    for m in candidates[:50]:  # cap at 50/day to avoid rate limit
+        stats = _http_get_json(f"{SITE_BASE}/api/me/stats?discordId={urllib.parse.quote(str(m.id))}") or {}
+        if not stats.get("ok") or stats.get("trades", 0) == 0:
+            continue
+        embed = discord.Embed(
+            title=f"☀️ Morning brief · {m.display_name}",
+            color=0x00F5D4,
+            description=(
+                f"**Your numbers so far:** {stats.get('trades',0)} trades · "
+                f"{stats.get('winRate',0):.0f}% WR · {stats.get('rSum',0):+.1f}R · "
+                f"${stats.get('netUsd',0):+,.0f} net\n\n"
+                f"**Cohort streak:** 🔥 {cohort_streak} consecutive winning trade-days\n\n"
+                "**Today's session:** NY AM 9:30–11:00 ET · NQ 30m\n"
+                "Triggers arm at 10:00. First side of OR to break wins."
+            ),
+        )
+        embed.set_footer(text="NOVA Algo · /morningdm-off to disable")
+        try:
+            await m.send(embed=embed)
+            sent += 1
+            await asyncio.sleep(0.5)  # rate-limit gentle
+        except discord.Forbidden:
+            continue  # DMs closed, skip silently
+        except discord.HTTPException:
+            continue
+    print(f"[bot] morning DM sent to {sent} members", flush=True)
+
+
+# ── Auto-fire daily bias poll (9:00 ET weekdays) ────────────────────────────
+
+async def _auto_post_bias_poll():
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    ch = discord.utils.get(guild.text_channels, name="pre-market")
+    if not ch:
+        return
+    embed = discord.Embed(
+        title="📊 Daily bias poll · NQ NY AM ORB",
+        color=0x00F5D4,
+        description=(
+            "Vote your bias for today's open. Tally posts after 11:00 ET.\n"
+            "One vote per person — change it any time before the bell."
+        ),
+    )
+    embed.set_footer(text="NOVA Algo · daily bias · auto-pushed 9:00 ET")
+    try:
+        await ch.send(embed=embed, view=BiasPollView())
+    except discord.HTTPException as e:
+        print(f"[bot] auto bias poll failed: {e}", flush=True)
+
+
 # ── Bias-poll auto-tally (11:00 ET when session closes) ─────────────────────
 
 async def _post_bias_poll_tally():
@@ -1108,6 +1351,14 @@ async def scheduler_loop():
     # Daily 7:00 ET — coffee chat thread
     if _should_fire("coffee_chat", now, (0, 1, 2, 3, 4), 7, 0):
         await _post_coffee_chat()
+
+    # Daily 7:30 ET — personal morning DM to opted-in cohort (weekdays)
+    if _should_fire("morning_dm", now, (0, 1, 2, 3, 4), 7, 30):
+        await _send_morning_dm_to_all()
+
+    # Daily 9:00 ET — auto-post bias poll buttons in #pre-market
+    if _should_fire("bias_poll_auto", now, (0, 1, 2, 3, 4), 9, 0):
+        await _auto_post_bias_poll()
 
     # Daily 12:00 ET — trivia question (weekdays only)
     if _should_fire("trivia_post", now, (0, 1, 2, 3, 4), 12, 0):
