@@ -1,0 +1,268 @@
+//@version=6
+// NOVA Master v1.4 — NY AM Opening Range Breakout (30m NQ)
+// =================================================================
+// Identical visual layout to the public NOVA Viewer + backtest engine
+// + BE + Trail + AUTO-EXIT alerts.
+//
+// What's NEW in v1.4 (2026-04-29):
+//   • Pine fires alert(action="exit") whenever the ACTIVE SL is touched
+//     (covers original SL, BE-armed level, and Trail-armed level).
+//   • Pine fires alert(action="exit") at session close (11:00 ET)
+//     when a position is still open.
+//   • This means subscriber accounts now mirror Sir's BE/Trail/Close
+//     behavior 1:1 — when Sir's chart says exit, Railway forwards
+//     exit to every subscriber's TradersPost which closes at market.
+//   • Broker-side STP at original $500 stays as catastrophic safety net.
+
+strategy("NOVA Master",
+     overlay              = true,
+     initial_capital      = 50000,
+     currency             = currency.USD,
+     default_qty_type     = strategy.fixed,
+     default_qty_value    = 1,
+     pyramiding           = 0,
+     process_orders_on_close = false,
+     calc_on_every_tick   = true,
+     close_entries_rule   = "ANY",
+     commission_type      = strategy.commission.cash_per_contract,
+     commission_value     = 2.50,
+     slippage             = 2,
+     max_lines_count      = 500,
+     max_labels_count     = 500,
+     max_boxes_count      = 100)
+
+// Risk
+i_risk_usd   = input.float(500.0,  "Stop Loss USD",   minval=50,  step=50,  group="Risk")
+i_reward_usd = input.float(2000.0, "Take Profit USD", minval=100, step=100, group="Risk")
+i_pt_val     = input.float(20.0,   "USD per Point",   minval=1,             group="Risk")
+i_qty        = input.int(1,        "Contracts",       minval=1,             group="Risk")
+
+// BE + Trail
+i_be_usd         = input.float(500.0,  "BE Trigger USD",     minval=0, step=50, group="BE / Trail")
+i_trail_trig_usd = input.float(750.0,  "Trail Trigger USD",  minval=0, step=50, group="BE / Trail")
+i_trail_dist_usd = input.float(500.0,  "Trail Distance USD", minval=50, step=50, group="BE / Trail")
+
+// Webhook (Railway dispatch)
+i_secret = input.string("mwSxZiKQNpkhJLYkPiOqAsFHAKY60LudicbyrVzeIUM", "Webhook Secret", group="Webhook")
+i_ticker = input.string("NQ1!", "Ticker for payload", group="Webhook")
+
+// Style
+col_or_high     = input.color(color.lime,                  "OR High line",      group="Style")
+col_or_low      = input.color(color.red,                   "OR Low line",       group="Style")
+col_or_bg       = input.color(color.new(color.yellow, 80), "OR bar background", group="Style")
+col_long        = input.color(color.lime,                  "BUY bubble fill",   group="Style")
+col_short       = input.color(color.red,                   "SELL bubble fill",  group="Style")
+col_bubble_text = input.color(color.white,                 "Bubble text",       group="Style")
+show_brackets   = input.bool(true, "Draw SL/TP bracket lines on each fill", group="Style")
+
+// Derived
+sl_pts      = i_risk_usd       / i_pt_val
+tp_pts      = i_reward_usd     / i_pt_val
+be_pts      = i_be_usd         / i_pt_val
+trail_t_pts = i_trail_trig_usd / i_pt_val
+trail_d_pts = i_trail_dist_usd / i_pt_val
+tick        = syminfo.mintick
+
+tz = "America/New_York"
+hh = hour(time, tz)
+mm = minute(time, tz)
+
+is_or_bar           = hh == 9 and mm == 30
+on_first_window_bar = is_or_bar[1]
+in_window           = (hh == 9 and mm > 30) or (hh == 10)
+is_session_close    = hh == 11 and mm == 0
+
+// State
+var float or_high      = na
+var float or_low       = na
+var bool  armed        = false
+var int   trades_today = 0
+var bool  be_armed     = false
+var bool  trail_armed  = false
+var float trail_stop_l = na
+var float trail_stop_s = na
+var bool  exit_fired   = false   // NEW v1.4 — guards exit alert from firing twice per trade
+
+var float long_trigger  = na
+var float short_trigger = na
+var float long_sl       = na
+var float long_tp       = na
+var float short_sl      = na
+var float short_tp      = na
+
+if is_or_bar
+    or_high      := high
+    or_low       := low
+    armed        := false
+    trades_today := 0
+    be_armed     := false
+    trail_armed  := false
+    exit_fired   := false
+
+if on_first_window_bar and not na(or_high) and not na(or_low) and not armed
+    long_trigger  := or_high + tick
+    short_trigger := or_low  - tick
+    long_sl       := long_trigger  - sl_pts
+    long_tp       := long_trigger  + tp_pts
+    short_sl      := short_trigger + sl_pts
+    short_tp      := short_trigger - tp_pts
+    armed := true
+
+// Entry — stop-entry breakout (matches Viewer 1:1)
+long_just_filled  = armed and trades_today == 0 and in_window and strategy.position_size == 0 and not na(long_trigger)  and high >= long_trigger
+short_just_filled = armed and trades_today == 0 and in_window and strategy.position_size == 0 and not na(short_trigger) and low  <= short_trigger
+
+if long_just_filled
+    strategy.entry("L", strategy.long, qty=i_qty, comment="ORB-L")
+    trail_stop_l := long_sl
+    trades_today := 1
+    be_armed     := false
+    trail_armed  := false
+    exit_fired   := false
+    long_payload = '{"ticker":"' + i_ticker + '","action":"buy","price":' + str.tostring(long_trigger, "#.##") + ',"sl":' + str.tostring(long_sl, "#.##") + ',"tp":' + str.tostring(long_tp, "#.##") + ',"qty":' + str.tostring(i_qty) + ',"comment":"NY_AM_ORB_long","secret":"' + i_secret + '"}'
+    alert(long_payload, alert.freq_once_per_bar)
+
+if short_just_filled
+    strategy.entry("S", strategy.short, qty=i_qty, comment="ORB-S")
+    trail_stop_s := short_sl
+    trades_today := 1
+    be_armed     := false
+    trail_armed  := false
+    exit_fired   := false
+    short_payload = '{"ticker":"' + i_ticker + '","action":"sell","price":' + str.tostring(short_trigger, "#.##") + ',"sl":' + str.tostring(short_sl, "#.##") + ',"tp":' + str.tostring(short_tp, "#.##") + ',"qty":' + str.tostring(i_qty) + ',"comment":"NY_AM_ORB_short","secret":"' + i_secret + '"}'
+    alert(short_payload, alert.freq_once_per_bar)
+
+entry_px = strategy.position_avg_price
+
+// BE move at +i_be_usd
+if i_be_usd > 0 and not be_armed and strategy.position_size > 0 and high >= entry_px + be_pts
+    trail_stop_l := math.max(trail_stop_l, entry_px)
+    be_armed := true
+if i_be_usd > 0 and not be_armed and strategy.position_size < 0 and low <= entry_px - be_pts
+    trail_stop_s := math.min(trail_stop_s, entry_px)
+    be_armed := true
+
+// Trail activation at +i_trail_trig_usd
+if i_trail_trig_usd > 0 and not trail_armed and strategy.position_size > 0 and high >= entry_px + trail_t_pts
+    trail_armed := true
+if i_trail_trig_usd > 0 and not trail_armed and strategy.position_size < 0 and low <= entry_px - trail_t_pts
+    trail_armed := true
+
+// Active trail — ratchet only in favor
+if trail_armed and strategy.position_size > 0
+    trail_stop_l := math.max(trail_stop_l, close - trail_d_pts)
+if trail_armed and strategy.position_size < 0
+    trail_stop_s := math.min(trail_stop_s, close + trail_d_pts)
+
+// ─── NEW v1.4: AUTO-EXIT ALERT on active-SL touch ──────────────
+// When price crosses the active SL (which moves with BE + Trail),
+// fire exit() alert so Railway closes the position on every subscriber TP.
+exit_long_sl  = strategy.position_size > 0 and not exit_fired and not na(trail_stop_l) and low  <= trail_stop_l
+exit_short_sl = strategy.position_size < 0 and not exit_fired and not na(trail_stop_s) and high >= trail_stop_s
+
+if exit_long_sl
+    reason = trail_armed ? "TrailExit" : be_armed ? "BEExit" : "SLExit"
+    exit_payload = '{"ticker":"' + i_ticker + '","action":"exit","price":' + str.tostring(close, "#.##") + ',"comment":"NY_AM_ORB_' + reason + '","secret":"' + i_secret + '"}'
+    alert(exit_payload, alert.freq_once_per_bar)
+    exit_fired := true
+
+if exit_short_sl
+    reason = trail_armed ? "TrailExit" : be_armed ? "BEExit" : "SLExit"
+    exit_payload = '{"ticker":"' + i_ticker + '","action":"exit","price":' + str.tostring(close, "#.##") + ',"comment":"NY_AM_ORB_' + reason + '","secret":"' + i_secret + '"}'
+    alert(exit_payload, alert.freq_once_per_bar)
+    exit_fired := true
+
+// ─── NEW v1.4: SESSION-CLOSE auto-exit at 11:00 ET ──────────────
+if is_session_close and strategy.position_size != 0 and not exit_fired
+    exit_payload = '{"ticker":"' + i_ticker + '","action":"exit","price":' + str.tostring(close, "#.##") + ',"comment":"NY_AM_ORB_EoS","secret":"' + i_secret + '"}'
+    alert(exit_payload, alert.freq_once_per_bar)
+    exit_fired := true
+
+// Exit orders refreshed each bar (broker-side stop+limit)
+if strategy.position_size > 0 and not na(trail_stop_l)
+    strategy.exit("L-X", from_entry="L",
+         stop  = trail_stop_l,
+         limit = entry_px + tp_pts,
+         comment_loss   = trail_armed ? "Trail" : be_armed ? "BE" : "SL",
+         comment_profit = "TP")
+if strategy.position_size < 0 and not na(trail_stop_s)
+    strategy.exit("S-X", from_entry="S",
+         stop  = trail_stop_s,
+         limit = entry_px - tp_pts,
+         comment_loss   = trail_armed ? "Trail" : be_armed ? "BE" : "SL",
+         comment_profit = "TP")
+
+// Session close flat (TV-side simulation)
+if is_session_close and strategy.position_size != 0
+    strategy.close_all(comment="EoS")
+
+pos_dir = strategy.position_size > 0 ? 1 : strategy.position_size < 0 ? -1 : 0
+
+// Exit markers
+long_tp_hit  = pos_dir[1] == 1  and strategy.position_size == 0 and high >= long_tp[1]
+long_sl_hit  = pos_dir[1] == 1  and strategy.position_size == 0 and low  <= long_sl[1]
+short_tp_hit = pos_dir[1] == -1 and strategy.position_size == 0 and low  <= short_tp[1]
+short_sl_hit = pos_dir[1] == -1 and strategy.position_size == 0 and high >= short_sl[1]
+session_flat = pos_dir[1] != 0  and is_session_close
+
+// ── Visuals (1:1 with Viewer) ──
+bgcolor(is_or_bar ? col_or_bg : na, title="OR BG")
+
+if on_first_window_bar and not na(or_high) and not na(or_low)
+    line.new(bar_index, or_high, bar_index + 24, or_high, color=col_or_high, width=2, extend=extend.none)
+    line.new(bar_index, or_low,  bar_index + 24, or_low,  color=col_or_low,  width=2, extend=extend.none)
+
+if long_just_filled
+    label.new(bar_index, low, text="BUY", color=col_long, textcolor=col_bubble_text, style=label.style_label_up, size=size.normal)
+if short_just_filled
+    label.new(bar_index, high, text="SELL", color=col_short, textcolor=col_bubble_text, style=label.style_label_down, size=size.normal)
+
+if show_brackets and long_just_filled
+    line.new(bar_index, long_trigger, bar_index + 30, long_trigger, color=col_long, width=2)
+    line.new(bar_index, long_sl,      bar_index + 30, long_sl,      color=col_short, width=1, style=line.style_dotted)
+    line.new(bar_index, long_tp,      bar_index + 30, long_tp,      color=col_long,  width=1, style=line.style_dotted)
+if show_brackets and short_just_filled
+    line.new(bar_index, short_trigger, bar_index + 30, short_trigger, color=col_short, width=2)
+    line.new(bar_index, short_sl,      bar_index + 30, short_sl,      color=col_long,  width=1, style=line.style_dotted)
+    line.new(bar_index, short_tp,      bar_index + 30, short_tp,      color=col_short, width=1, style=line.style_dotted)
+
+plotshape(long_tp_hit,  "Long TP",  shape.flag,    location.abovebar, col_long,  size=size.tiny, text="TP")
+plotshape(long_sl_hit,  "Long SL",  shape.xcross,  location.belowbar, col_short, size=size.tiny, text="SL")
+plotshape(short_tp_hit, "Short TP", shape.flag,    location.belowbar, col_short, size=size.tiny, text="TP")
+plotshape(short_sl_hit, "Short SL", shape.xcross,  location.abovebar, col_long,  size=size.tiny, text="SL")
+plotshape(session_flat, "EoS",      shape.diamond, location.absolute, color.gray, size=size.tiny, text="EoS")
+
+// Active stop visualization
+plot_active_stop = strategy.position_size > 0 ? trail_stop_l : strategy.position_size < 0 ? trail_stop_s : na
+plot(plot_active_stop, "Active SL", color=color.new(color.fuchsia, 30), style=plot.style_linebr, linewidth=1)
+
+// ── Dashboard ──
+var table dash = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 50))
+
+if barstate.islast or barstate.isrealtime
+    title_bg = color.new(color.navy, 30)
+    row_bg   = color.new(color.black, 40)
+
+    pos_text  = pos_dir > 0 ? "LONG" : pos_dir < 0 ? "SHORT" : "Flat"
+    pos_color = pos_dir > 0 ? col_long : pos_dir < 0 ? col_short : color.gray
+    or_text   = (na(or_high) or na(or_low)) ? "-" : str.tostring(or_low, "#.##") + " / " + str.tostring(or_high, "#.##")
+    state_text = trail_armed ? "TRAIL" : be_armed ? "BE" : strategy.position_size != 0 ? "OPEN" : trades_today > 0 ? "DONE" : "WAIT"
+    state_col  = trail_armed ? color.fuchsia : be_armed ? color.orange : strategy.position_size != 0 ? color.aqua : color.gray
+
+    table.cell(dash, 0, 0, "NOVA MASTER",     text_color=color.white,                 bgcolor=title_bg)
+    table.cell(dash, 1, 0, "v1.4",            text_color=color.new(color.aqua, 0),    bgcolor=title_bg)
+    table.cell(dash, 0, 1, "TF/Symbol",       text_color=color.white,                 bgcolor=row_bg)
+    table.cell(dash, 1, 1, timeframe.period + "m " + syminfo.ticker, text_color=color.white, bgcolor=row_bg)
+    table.cell(dash, 0, 2, "SL/TP",           text_color=color.white,                 bgcolor=row_bg)
+    table.cell(dash, 1, 2, "$" + str.tostring(i_risk_usd, "#") + " / $" + str.tostring(i_reward_usd, "#"), text_color=color.white, bgcolor=row_bg)
+    table.cell(dash, 0, 3, "BE / Trail",      text_color=color.white,                 bgcolor=row_bg)
+    table.cell(dash, 1, 3, "$" + str.tostring(i_be_usd, "#") + " / $" + str.tostring(i_trail_trig_usd, "#"), text_color=color.white, bgcolor=row_bg)
+    table.cell(dash, 0, 4, "Status",          text_color=color.white,                 bgcolor=row_bg)
+    table.cell(dash, 1, 4, pos_text,          text_color=pos_color,                   bgcolor=row_bg)
+    table.cell(dash, 0, 5, "State",           text_color=color.white,                 bgcolor=row_bg)
+    table.cell(dash, 1, 5, state_text,        text_color=state_col,                   bgcolor=row_bg)
+    table.cell(dash, 0, 6, "OR",              text_color=color.white,                 bgcolor=row_bg)
+    table.cell(dash, 1, 6, or_text,           text_color=color.yellow,                bgcolor=row_bg)
+    table.cell(dash, 0, 7, "Webhook",         text_color=color.white,                 bgcolor=row_bg)
+    table.cell(dash, 1, 7, "-> Railway",      text_color=color.new(color.aqua, 0),    bgcolor=row_bg)
