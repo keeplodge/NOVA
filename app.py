@@ -1588,6 +1588,67 @@ def _fetch_macro_events_week() -> list[dict]:
         return []
 
 
+_link_codes: dict[str, dict] = {}  # code -> {discord_id, discord_name, expires_at}
+_LINK_CODE_TTL_SEC = 600  # 10 minutes
+
+
+def _purge_expired_link_codes():
+    now = datetime.now(EST).timestamp()
+    expired = [c for c, d in _link_codes.items() if d.get("expires_at", 0) < now]
+    for c in expired:
+        _link_codes.pop(c, None)
+
+
+@app.route("/admin/link/issue", methods=["POST"])
+def admin_link_issue():
+    """Bot calls this with a Discord user ID. Returns a 6-digit linking code
+    that the user pastes at novaalgo.org/portal/link-discord. Code expires in 10m."""
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    discord_id = str(body.get("discord_id", "")).strip()
+    discord_name = str(body.get("discord_name", "")).strip()
+    if not discord_id:
+        return jsonify({"status": "bad-request", "message": "discord_id required"}), 400
+    _purge_expired_link_codes()
+    # Generate 6-digit numeric code, retry on collision
+    import secrets
+    for _ in range(8):
+        code = f"{secrets.randbelow(10**6):06d}"
+        if code not in _link_codes:
+            break
+    expires = datetime.now(EST).timestamp() + _LINK_CODE_TTL_SEC
+    _link_codes[code] = {
+        "discord_id": discord_id,
+        "discord_name": discord_name,
+        "expires_at": expires,
+    }
+    return jsonify({"status": "ok", "code": code, "expires_in_sec": _LINK_CODE_TTL_SEC}), 200
+
+
+@app.route("/admin/link/consume", methods=["POST"])
+def admin_link_consume():
+    """Site calls this with a code. Returns the discord_id if valid + not expired,
+    then deletes the code (one-shot)."""
+    authed, reason = _webhook_auth_ok(request)
+    if not authed:
+        return jsonify({"status": "unauthorized", "message": reason}), 401
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).strip()
+    if not code:
+        return jsonify({"status": "bad-request", "message": "code required"}), 400
+    _purge_expired_link_codes()
+    entry = _link_codes.pop(code, None)
+    if not entry:
+        return jsonify({"status": "not-found"}), 404
+    return jsonify({
+        "status": "ok",
+        "discord_id": entry["discord_id"],
+        "discord_name": entry.get("discord_name", ""),
+    }), 200
+
+
 @app.route("/admin/halt", methods=["POST"])
 def admin_halt():
     """Manually halt fanout for the rest of the session. Cleared at next day rollover."""

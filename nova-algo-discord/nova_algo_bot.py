@@ -317,6 +317,50 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
             print(f"[bot] missing perms to remove {role_name}", flush=True)
 
 
+# ── /link slash command — connect Discord to novaalgo.org account ───────────
+
+@tree.command(
+    name="link",
+    description="Get a 6-digit code to link your Discord to your NOVA Algo account.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_link(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        body = json.dumps({
+            "discord_id":   str(interaction.user.id),
+            "discord_name": interaction.user.name,
+        }).encode()
+        req = urllib.request.Request(
+            f"{API_BASE}/admin/link/issue",
+            data=body,
+            headers={"Content-Type": "application/json", "X-Nova-Secret": SECRET},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            payload = json.loads(r.read().decode())
+    except Exception as e:
+        await interaction.followup.send(f"Couldn't reach Railway: {e}", ephemeral=True)
+        return
+    if payload.get("status") != "ok":
+        await interaction.followup.send("Couldn't issue a link code right now.", ephemeral=True)
+        return
+    code = payload.get("code", "")
+    embed = discord.Embed(
+        title="🔗 Link Discord → NOVA Algo",
+        color=0x00F5D4,
+        description=(
+            f"**Your one-time code: `{code}`**\n\n"
+            f"1. Open [{SITE_BASE}/portal/link-discord]({SITE_BASE}/portal/link-discord)\n"
+            f"2. Sign in if needed\n"
+            f"3. Paste this code → Submit\n\n"
+            f"Code expires in **10 minutes**. Single-use."
+        ),
+    )
+    embed.set_footer(text="NOVA Algo · /link · only you see this")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # ── /faq slash command ──────────────────────────────────────────────────────
 
 @tree.command(
