@@ -86,6 +86,36 @@ def _fetch_subscribers() -> list[dict]:
         return _cache["data"]
 
 
+def _to_traderspost_shape(payload: dict) -> dict:
+    """Translate Pine's flat alert payload to TradersPost's nested order shape.
+
+    Pine emits {action,price,sl,tp,qty,...}. TradersPost requires nested
+    `stopLoss.stopPrice` and `takeProfit.limitPrice` to attach a bracket on
+    entry — without these, subscriber accounts open a NAKED position even
+    though the founder's primary route gets a bracket via app.build_traderspost_payload.
+    """
+    action = (payload.get("action") or "").lower()
+    sentiment_map = {"buy": "bullish", "sell": "bearish"}
+    out: dict[str, Any] = {
+        "ticker":    str(payload.get("ticker", "")).upper().strip(),
+        "action":    action,
+        "price":     float(payload.get("price", 0)) if payload.get("price") is not None else None,
+        "quantity":  int(payload.get("qty") or payload.get("quantity") or 1),
+        "orderType": payload.get("orderType", "market"),
+        "sentiment": sentiment_map.get(action, "bullish"),
+        "comment":   payload.get("comment", ""),
+    }
+    sl = payload.get("sl")
+    tp = payload.get("tp")
+    if sl is not None:
+        try: out["stopLoss"]   = {"type": "stop", "stopPrice": float(sl)}
+        except (TypeError, ValueError): pass
+    if tp is not None:
+        try: out["takeProfit"] = {"limitPrice": float(tp)}
+        except (TypeError, ValueError): pass
+    return out
+
+
 def _post_one(url: str, payload: dict) -> tuple[int, str]:
     try:
         req = urllib.request.Request(
@@ -121,11 +151,17 @@ def fanout_signal(payload: dict) -> dict:
     threads: list[threading.Thread] = []
     lock = threading.Lock()
 
+    # Translate flat Pine payload (sl/tp) to TradersPost nested shape
+    # (stopLoss/takeProfit) ONCE so every subscriber's TradersPost attaches
+    # a bracket on entry. Bug 2026-05-01: fanning the raw Pine body left
+    # subs naked while founder's primary route had a proper bracket.
+    tp_payload = _to_traderspost_shape(payload)
+
     def _worker(sub: dict) -> None:
         url = sub.get("webhookUrl")
         if not url:
             return
-        status, body = _post_one(url, payload)
+        status, body = _post_one(url, tp_payload)
         ok = 200 <= (status or 0) < 300
         with lock:
             results.append({
