@@ -1274,7 +1274,12 @@ def discord_test():
 
 @app.route("/discord/equity/post", methods=["POST"])
 def discord_equity_post():
-    """Push current equity snapshot to #equity-curve. Used by daily cron."""
+    """Push current equity snapshot to #equity-curve. Used by daily cron.
+
+    Body may override `accounts` (preferred — Vercel cron computes from Clerk
+    fills) and `day_pnl_total`. Falls back to build_equity_data() (which reads
+    EVAL_ACCOUNTS hardcoded dict, prone to drift) when accounts is omitted.
+    """
     if not discord_bridge:
         return jsonify({"status": "error", "message": "discord_bridge unavailable"}), 503
     authed, reason = _webhook_auth_ok(request)
@@ -1286,7 +1291,12 @@ def discord_equity_post():
         day_pnl = float(day_pnl) if day_pnl is not None else None
     except (TypeError, ValueError):
         day_pnl = None
-    ok = discord_bridge.post_equity_snapshot(build_equity_data(), day_pnl_total=day_pnl)
+    # Prefer caller-supplied accounts (Clerk-derived, accurate) over the
+    # hardcoded EVAL_ACCOUNTS dict.
+    accounts = body.get("accounts")
+    if not isinstance(accounts, list) or not accounts:
+        accounts = build_equity_data()
+    ok = discord_bridge.post_equity_snapshot(accounts, day_pnl_total=day_pnl)
     return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
 
 
