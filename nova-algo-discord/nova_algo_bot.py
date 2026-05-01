@@ -1406,11 +1406,44 @@ def _should_fire(task: str, now: datetime, weekdays: tuple[int, ...] | None,
     return True
 
 
+def _heartbeat_post():
+    """Fire-and-forget POST to novaalgo.org/api/bot/heartbeat. Watchdog cron
+    reads founder Clerk publicMetadata.botLastSeen and pages Telegram if
+    it goes stale > 15 min before NY AM bell."""
+    if not SECRET:
+        return
+    body = json.dumps({
+        "scheduler_loop_running": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{SITE_BASE}/api/bot/heartbeat",
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {SECRET}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            r.read()
+    except Exception as e:
+        print(f"[bot] heartbeat failed: {e}", flush=True)
+
+
+async def _heartbeat_async():
+    await asyncio.to_thread(_heartbeat_post)
+
+
 @tasks.loop(minutes=1)
 async def scheduler_loop():
     if not client.is_ready():
         return
     now = datetime.now(EST)
+
+    # Heartbeat every minute → novaalgo.org watchdog reads it weekday 8 ET
+    if now.minute % 5 == 0:
+        await _heartbeat_async()
 
     # Daily 7:00 ET — coffee chat thread
     if _should_fire("coffee_chat", now, (0, 1, 2, 3, 4), 7, 0):
@@ -1511,6 +1544,9 @@ async def on_ready():
     if not scheduler_loop.is_running():
         scheduler_loop.start()
         print("[bot] scheduler_loop started", flush=True)
+
+    # First heartbeat right away so watchdog knows we're up
+    await _heartbeat_async()
 
 
 def main():
