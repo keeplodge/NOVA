@@ -1240,6 +1240,40 @@ class SentimentView(discord.ui.View):
         await interaction.response.send_message("Logged. The cohort's got you. Reset.", ephemeral=True)
 
 
+async def _post_friday_feedback_poll():
+    """Anonymous weekly cohort feedback prompt in #feedback. 4 reaction
+    buckets — only emoji counts surface to staff; reactor identities aren't
+    tied to specific bucket choices in any visible Discord ledger."""
+    guild = client.get_guild(GUILD_ID)
+    if not guild:
+        return
+    ch = discord.utils.get(guild.text_channels, name="feedback")
+    if not ch:
+        return
+    today = datetime.now(EST).strftime("%a %b %d")
+    embed = discord.Embed(
+        title=f"🗳 Weekly cohort feedback · {today}",
+        color=0x00F5D4,
+        description=(
+            "How was this week? React below with what fits — fully anonymous. "
+            "Only the count surfaces to staff; **nothing about who picked what** is visible "
+            "in your Discord profile, modlog, or anywhere else.\n\n"
+            "🟢 What worked\n"
+            "🟡 Mixed feelings\n"
+            "🔴 What's frustrating\n"
+            "💬 I want to say more (drop a thread reply)"
+        ),
+    )
+    embed.set_footer(text="NOVA Algo · weekly · auto-archives next Friday")
+    msg = await ch.send(embed=embed)
+    for emoji in ("🟢", "🟡", "🔴", "💬"):
+        try:
+            await msg.add_reaction(emoji)
+        except discord.HTTPException:
+            pass
+    print(f"[bot] feedback poll posted to #feedback msg_id={msg.id}", flush=True)
+
+
 async def _post_friday_sentiment_poll():
     guild = client.get_guild(GUILD_ID)
     if not guild:
@@ -1371,6 +1405,10 @@ async def scheduler_loop():
     # Daily 11:00 ET — bias poll tally (after session closes)
     if _should_fire("bias_tally", now, (0, 1, 2, 3, 4), 11, 0):
         await _post_bias_poll_tally()
+
+    # Friday 16:00 ET — anonymous weekly cohort feedback poll in #feedback
+    if _should_fire("friday_feedback", now, (4,), 16, 0):
+        await _post_friday_feedback_poll()
 
     # Friday 16:30 ET — weekly leaderboard + sentiment poll
     if _should_fire("friday_lb", now, (4,), 16, 30):

@@ -86,21 +86,29 @@ def _fetch_subscribers() -> list[dict]:
         return _cache["data"]
 
 
-def _to_traderspost_shape(payload: dict) -> dict:
+def _to_traderspost_shape(payload: dict, size_multiplier: float = 1.0) -> dict:
     """Translate Pine's flat alert payload to TradersPost's nested order shape.
 
     Pine emits {action,price,sl,tp,qty,...}. TradersPost requires nested
     `stopLoss.stopPrice` and `takeProfit.limitPrice` to attach a bracket on
     entry — without these, subscriber accounts open a NAKED position even
     though the founder's primary route gets a bracket via app.build_traderspost_payload.
+
+    `size_multiplier` scales the qty for per-account sizing (0.5x / 1x / 2x).
+    Default 1.0 preserves original Pine qty. Always rounds up to at least 1
+    contract — fractional rounds to ceiling so 0.5x of qty=1 still trades 1 contract.
     """
     action = (payload.get("action") or "").lower()
     sentiment_map = {"buy": "bullish", "sell": "bearish"}
+    base_qty = int(payload.get("qty") or payload.get("quantity") or 1)
+    # Apply multiplier — clamp final qty between 1 and 20 (sanity bound)
+    import math
+    scaled_qty = max(1, min(20, math.ceil(base_qty * size_multiplier)))
     out: dict[str, Any] = {
         "ticker":    str(payload.get("ticker", "")).upper().strip(),
         "action":    action,
         "price":     float(payload.get("price", 0)) if payload.get("price") is not None else None,
-        "quantity":  int(payload.get("qty") or payload.get("quantity") or 1),
+        "quantity":  scaled_qty,
         "orderType": payload.get("orderType", "market"),
         "sentiment": sentiment_map.get(action, "bullish"),
         "comment":   payload.get("comment", ""),
@@ -152,15 +160,25 @@ def fanout_signal(payload: dict) -> dict:
     lock = threading.Lock()
 
     # Translate flat Pine payload (sl/tp) to TradersPost nested shape
-    # (stopLoss/takeProfit) ONCE so every subscriber's TradersPost attaches
-    # a bracket on entry. Bug 2026-05-01: fanning the raw Pine body left
-    # subs naked while founder's primary route had a proper bracket.
-    tp_payload = _to_traderspost_shape(payload)
+    # (stopLoss/takeProfit) PER subscriber so each gets their personalized
+    # sizeMultiplier applied to qty. Bug 2026-05-01: fanning the raw Pine
+    # body left subs naked while founder's primary route had a proper bracket.
 
     def _worker(sub: dict) -> None:
         url = sub.get("webhookUrl")
         if not url:
             return
+        # Per-subscriber size scaling — defaults to 1x. Set via /portal/connect.
+        mul_raw = sub.get("sizeMultiplier")
+        size_multiplier = 1.0
+        try:
+            if mul_raw is not None:
+                size_multiplier = float(mul_raw)
+                if not (0.25 <= size_multiplier <= 4.0):
+                    size_multiplier = 1.0
+        except (TypeError, ValueError):
+            size_multiplier = 1.0
+        tp_payload = _to_traderspost_shape(payload, size_multiplier=size_multiplier)
         status, body = _post_one(url, tp_payload)
         ok = 200 <= (status or 0) < 300
         with lock:
