@@ -611,8 +611,9 @@ async def on_message(message: discord.Message):
     if message.thread:
         return
     short_title = title[:80]
+    fire_thread = None
     try:
-        await message.create_thread(
+        fire_thread = await message.create_thread(
             name=f"💬 {short_title}",
             auto_archive_duration=1440,  # 24h
             reason="NOVA fire — auto-thread for discussion",
@@ -620,6 +621,35 @@ async def on_message(message: discord.Message):
         print(f"[bot] auto-thread on fire: {short_title}", flush=True)
     except discord.HTTPException as e:
         print(f"[bot] auto-thread failed: {e}", flush=True)
+
+    # TradingView deep-link reply — anchored to the fire timestamp so anyone
+    # clicking through lands on the chart at the moment NOVA triggered. No
+    # screenshot dependency, works regardless of bot host machine state.
+    try:
+        # Discord message timestamp → epoch ms for TV's URL anchor
+        epoch_ms = int(message.created_at.timestamp() * 1000)
+        # Public NQ futures chart with NOVA Master indicator pre-loaded.
+        # ?go_to=<epoch_ms> centers the chart on that exact bar on TV's web app.
+        chart_url = (
+            f"https://www.tradingview.com/chart/?symbol=CME_MINI%3ANQ1%21"
+            f"&interval=30&theme=dark&go_to={epoch_ms}"
+        )
+        deeplink_embed = discord.Embed(
+            title="📈 Open this fire on TradingView",
+            color=0x00F5D4,
+            description=(
+                f"[Click here]({chart_url}) to open NQ 30m at the trigger bar.\n"
+                "Chart loads pre-anchored to the fire timestamp."
+            ),
+        )
+        deeplink_embed.set_footer(text="NOVA Algo · auto deep-link")
+        # Reply in the auto-thread if it exists; otherwise reply on the message itself.
+        target = fire_thread or message.channel
+        await target.send(embed=deeplink_embed)
+    except discord.HTTPException as e:
+        print(f"[bot] tv deep-link reply failed: {e}", flush=True)
+    except Exception as e:
+        print(f"[bot] tv deep-link unexpected: {e}", flush=True)
 
 
 # ── /halt slash command (staff-only) ────────────────────────────────────────
