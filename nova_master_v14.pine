@@ -63,6 +63,69 @@ trail_t_pts = i_trail_trig_usd / i_pt_val
 trail_d_pts = i_trail_dist_usd / i_pt_val
 tick        = syminfo.mintick
 
+// ── Setup Grader (v1.4.2 — Phase 1, no delta) ─────────────────────
+// Inputs (Pine-native only):
+//   Volume Profile path (30%) — volume in the breakout's price-zone over
+//     the last 30 bars. Less volume in the path = clean LVN = higher grade.
+//   Breakout Volume (25%) — current bar volume vs 20-bar SMA.
+//   OR Width Regime (20%) — OR width vs ATR(20)*2 baseline; flags
+//     shock/compression mornings.
+//   VWAP alignment (15%) — long above / short below.
+//   (Reserved 10% for delta in Phase 2 — currently unused; total scaled to 100.)
+//
+// Grades: A+ ≥ 90 | A ≥ 80 | A- ≥ 70 | B+ ≥ 60 | B < 60.
+compute_setup_grade(side, or_h, or_l, broken_level, _sl_pts, _tp_pts, _avg_vol, _atr20, _vwap_val) =>
+    target_level = side > 0 ? broken_level + _tp_pts : broken_level - _tp_pts
+    zone_high = math.max(broken_level, target_level)
+    zone_low  = math.min(broken_level, target_level)
+
+    total_vol   = 0.0
+    overlap_vol = 0.0
+    for i = 1 to 30
+        bh = high[i]
+        bl = low[i]
+        bv = volume[i]
+        total_vol += bv
+        if bh >= zone_low and bl <= zone_high
+            overlap = math.min(bh, zone_high) - math.max(bl, zone_low)
+            br      = bh - bl
+            if br > 0
+                overlap_vol += bv * (overlap / br)
+    vp_ratio = total_vol > 0 ? overlap_vol / total_vol : 0.5
+    vp_pts   = math.max(0.0, math.min(30.0, 30.0 * (1.0 - vp_ratio / 0.4)))
+
+    vol_ratio   = _avg_vol > 0 ? volume / _avg_vol : 1.0
+    vol_pts     = math.max(0.0, math.min(25.0, 25.0 * (vol_ratio - 0.5) / 1.5))
+
+    or_width    = or_h - or_l
+    expected_or = _atr20 * 2.0
+    or_ratio    = expected_or > 0 ? or_width / expected_or : 1.0
+    regime_pts  = or_ratio < 0.7 ? 10.0 : or_ratio < 1.3 ? 20.0 : or_ratio < 2.0 ? 10.0 : 0.0
+
+    aligned   = (side > 0 and close > _vwap_val) or (side < 0 and close < _vwap_val)
+    vwap_pts  = aligned ? 15.0 : 0.0
+
+    raw_total = vp_pts + vol_pts + regime_pts + vwap_pts
+    scaled    = raw_total * 100.0 / 90.0   // Phase 1 weights sum to 90
+
+    grade_letter = scaled >= 90.0 ? "A+" : scaled >= 80.0 ? "A" : scaled >= 70.0 ? "A-" : scaled >= 60.0 ? "B+" : "B"
+
+    [grade_letter, scaled, vp_pts, vol_pts, regime_pts, vwap_pts]
+
+// Pre-compute ta.* every bar so their state stays consistent when the grader
+// is invoked conditionally inside the entry-fire branches.
+g_avg_vol  = ta.sma(volume, 20)
+g_atr20    = ta.atr(20)
+g_vwap_val = ta.vwap
+
+var string grade_str    = "—"
+var float  grade_score  = na
+var float  grade_vp     = na
+var float  grade_vol    = na
+var float  grade_regime = na
+var float  grade_vwap   = na
+var int    grade_side   = 0   // 1 = long-side grade, -1 = short-side, 0 = unset
+
 tz = "America/New_York"
 hh = hour(time, tz)
 mm = minute(time, tz)
@@ -98,6 +161,13 @@ if is_or_bar
     be_armed     := false
     trail_armed  := false
     exit_fired   := false
+    grade_str    := "—"
+    grade_score  := na
+    grade_vp     := na
+    grade_vol    := na
+    grade_regime := na
+    grade_vwap   := na
+    grade_side   := 0
 
 if on_first_window_bar and not na(or_high) and not na(or_low) and not armed
     long_trigger  := or_high + tick
@@ -119,7 +189,15 @@ if long_just_filled
     be_armed     := false
     trail_armed  := false
     exit_fired   := false
-    long_payload = '{"ticker":"' + i_ticker + '","action":"buy","price":' + str.tostring(long_trigger, "#.##") + ',"sl":' + str.tostring(long_sl, "#.##") + ',"tp":' + str.tostring(long_tp, "#.##") + ',"qty":' + str.tostring(i_qty) + ',"comment":"NY_AM_ORB_long","secret":"' + i_secret + '"}'
+    [_g, _s, _vp, _vo, _rg, _vw] = compute_setup_grade(1, or_high, or_low, long_trigger, sl_pts, tp_pts, g_avg_vol, g_atr20, g_vwap_val)
+    grade_str    := _g
+    grade_score  := _s
+    grade_vp     := _vp
+    grade_vol    := _vo
+    grade_regime := _rg
+    grade_vwap   := _vw
+    grade_side   := 1
+    long_payload = '{"ticker":"' + i_ticker + '","action":"buy","price":' + str.tostring(long_trigger, "#.##") + ',"sl":' + str.tostring(long_sl, "#.##") + ',"tp":' + str.tostring(long_tp, "#.##") + ',"qty":' + str.tostring(i_qty) + ',"grade":"' + _g + '","grade_score":' + str.tostring(_s, "#") + ',"comment":"NY_AM_ORB_long","secret":"' + i_secret + '"}'
     alert(long_payload, alert.freq_once_per_bar)
 
 if short_just_filled
@@ -129,7 +207,15 @@ if short_just_filled
     be_armed     := false
     trail_armed  := false
     exit_fired   := false
-    short_payload = '{"ticker":"' + i_ticker + '","action":"sell","price":' + str.tostring(short_trigger, "#.##") + ',"sl":' + str.tostring(short_sl, "#.##") + ',"tp":' + str.tostring(short_tp, "#.##") + ',"qty":' + str.tostring(i_qty) + ',"comment":"NY_AM_ORB_short","secret":"' + i_secret + '"}'
+    [_g, _s, _vp, _vo, _rg, _vw] = compute_setup_grade(-1, or_high, or_low, short_trigger, sl_pts, tp_pts, g_avg_vol, g_atr20, g_vwap_val)
+    grade_str    := _g
+    grade_score  := _s
+    grade_vp     := _vp
+    grade_vol    := _vo
+    grade_regime := _rg
+    grade_vwap   := _vw
+    grade_side   := -1
+    short_payload = '{"ticker":"' + i_ticker + '","action":"sell","price":' + str.tostring(short_trigger, "#.##") + ',"sl":' + str.tostring(short_sl, "#.##") + ',"tp":' + str.tostring(short_tp, "#.##") + ',"qty":' + str.tostring(i_qty) + ',"grade":"' + _g + '","grade_score":' + str.tostring(_s, "#") + ',"comment":"NY_AM_ORB_short","secret":"' + i_secret + '"}'
     alert(short_payload, alert.freq_once_per_bar)
 
 entry_px = strategy.position_avg_price
@@ -266,3 +352,29 @@ if barstate.islast or barstate.isrealtime
     table.cell(dash, 1, 6, or_text,           text_color=color.yellow,                bgcolor=row_bg)
     table.cell(dash, 0, 7, "Webhook",         text_color=color.white,                 bgcolor=row_bg)
     table.cell(dash, 1, 7, "-> Railway",      text_color=color.new(color.aqua, 0),    bgcolor=row_bg)
+
+// ── Grade Box (bottom-right) ────────────────────────────────────
+// Phase 1 — VP / Volume / Regime / VWAP. Locked at entry-fire moment.
+var table grade_box = table.new(position.bottom_right, 2, 7,
+     bgcolor=color.new(color.black, 15), border_width=1, border_color=color.new(color.gray, 40))
+
+if barstate.islast or barstate.isrealtime
+    grade_color = grade_str == "A+" ? color.new(#00ff88, 0) : grade_str == "A" ? color.new(#22dd66, 0) : grade_str == "A-" ? color.new(#88dd44, 0) : grade_str == "B+" ? color.new(#ddcc44, 0) : grade_str == "B" ? color.new(#dd8844, 0) : color.new(color.gray, 0)
+    grade_title_bg = color.new(color.navy, 30)
+    grade_row_bg   = color.new(color.black, 40)
+    side_str       = grade_side > 0 ? "LONG" : grade_side < 0 ? "SHORT" : "—"
+
+    table.cell(grade_box, 0, 0, "SETUP GRADE",          text_color=color.white,  bgcolor=grade_title_bg, text_size=size.small)
+    table.cell(grade_box, 1, 0, side_str,               text_color=grade_side > 0 ? col_long : grade_side < 0 ? col_short : color.gray, bgcolor=grade_title_bg, text_size=size.small)
+    table.cell(grade_box, 0, 1, grade_str,              text_color=grade_color,  bgcolor=grade_row_bg, text_size=size.huge)
+    table.cell(grade_box, 1, 1, na(grade_score) ? "—" : str.tostring(grade_score, "#") + " / 100", text_color=color.white, bgcolor=grade_row_bg, text_size=size.normal)
+    table.cell(grade_box, 0, 2, "Volume Profile",       text_color=color.white,  bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 2, na(grade_vp)     ? "—" : str.tostring(grade_vp,     "#")  + " / 30", text_color=color.new(color.aqua, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 0, 3, "Breakout Volume",      text_color=color.white,  bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 3, na(grade_vol)    ? "—" : str.tostring(grade_vol,    "#")  + " / 25", text_color=color.new(color.aqua, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 0, 4, "OR Width Regime",      text_color=color.white,  bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 4, na(grade_regime) ? "—" : str.tostring(grade_regime, "#")  + " / 20", text_color=color.new(color.aqua, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 0, 5, "VWAP Align",           text_color=color.white,  bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 5, na(grade_vwap)   ? "—" : str.tostring(grade_vwap,   "#")  + " / 15", text_color=color.new(color.aqua, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 0, 6, "Delta (Phase 2)",      text_color=color.new(color.gray, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 6, "—",                    text_color=color.new(color.gray, 0), bgcolor=grade_row_bg, text_size=size.tiny)

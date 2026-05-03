@@ -1,0 +1,279 @@
+//@version=6
+// NOVA Viewer · NY AM Opening Range Breakout
+// Companion indicator for NOVA Algo subscribers — paints the exact same
+// signals the production strategy fires (OR boundaries, breakout entries,
+// SL/TP brackets, exits) on the subscriber's chart.
+//
+// This is a VIEWER ONLY. It does not place orders, does not call alert(),
+// and does not include the proprietary risk-engine code. Execution happens
+// server-side via Railway → TradersPost (subscriber connects their account
+// at novaalgo.org/portal/connect).
+//
+// Source code visibility: OFF when published.
+indicator("NOVA Viewer · NY AM ORB",
+     overlay              = true,
+     max_lines_count      = 500,
+     max_labels_count     = 500,
+     max_boxes_count      = 100)
+
+// ── Risk display ──
+i_risk_usd     = input.float(500.0,  "Stop Loss ($)",          minval=50, step=50, group="Risk display")
+i_reward_usd   = input.float(2000.0, "Take Profit ($)",        minval=50, step=50, group="Risk display")
+i_pt_val       = input.float(20.0,   "USD per Point",          minval=1,  group="Risk display")
+i_qty          = input.int(1,        "Contracts (display)",    minval=1,  group="Risk display")
+
+// ── Date filter ──
+i_use_filter = input.bool(false, "Use Date Window", group="Date window")
+i_start      = input.time(timestamp("2026-04-01"), "Start Date", group="Date window")
+i_end        = input.time(timestamp("2026-12-31"), "End Date",   group="Date window")
+
+// ── Style ──
+col_or_high   = input.color(color.lime,                  "OR High line",  group="Style")
+col_or_low    = input.color(color.red,                   "OR Low line",   group="Style")
+col_or_bg     = input.color(color.new(color.yellow, 80), "OR bar background", group="Style")
+col_long      = input.color(color.lime,                  "Long fill",     group="Style")
+col_short     = input.color(color.red,                   "Short fill",    group="Style")
+show_brackets = input.bool(true, "Draw SL/TP bracket lines on each fill", group="Style")
+
+// ── Derived ──
+sl_pts = i_risk_usd   / i_pt_val
+tp_pts = i_reward_usd / i_pt_val
+tick   = syminfo.mintick
+
+// ── Setup Grader (matches NOVA Master 1:1) ────────────────────────
+// Phase 1 weighting: VP 30 + Volume 25 + Regime 20 + VWAP 15 = 90, scaled to 100.
+// (10 pts reserved for delta in Phase 2.)
+compute_setup_grade(side, or_h, or_l, broken_level, _sl_pts, _tp_pts, _avg_vol, _atr20, _vwap_val) =>
+    target_level = side > 0 ? broken_level + _tp_pts : broken_level - _tp_pts
+    zone_high = math.max(broken_level, target_level)
+    zone_low  = math.min(broken_level, target_level)
+    total_vol   = 0.0
+    overlap_vol = 0.0
+    for i = 1 to 30
+        bh = high[i]
+        bl = low[i]
+        bv = volume[i]
+        total_vol += bv
+        if bh >= zone_low and bl <= zone_high
+            overlap = math.min(bh, zone_high) - math.max(bl, zone_low)
+            br      = bh - bl
+            if br > 0
+                overlap_vol += bv * (overlap / br)
+    vp_ratio = total_vol > 0 ? overlap_vol / total_vol : 0.5
+    vp_pts   = math.max(0.0, math.min(30.0, 30.0 * (1.0 - vp_ratio / 0.4)))
+
+    vol_ratio = _avg_vol > 0 ? volume / _avg_vol : 1.0
+    vol_pts   = math.max(0.0, math.min(25.0, 25.0 * (vol_ratio - 0.5) / 1.5))
+
+    or_width    = or_h - or_l
+    expected_or = _atr20 * 2.0
+    or_ratio    = expected_or > 0 ? or_width / expected_or : 1.0
+    regime_pts  = or_ratio < 0.7 ? 10.0 : or_ratio < 1.3 ? 20.0 : or_ratio < 2.0 ? 10.0 : 0.0
+
+    aligned   = (side > 0 and close > _vwap_val) or (side < 0 and close < _vwap_val)
+    vwap_pts  = aligned ? 15.0 : 0.0
+
+    raw_total = vp_pts + vol_pts + regime_pts + vwap_pts
+    scaled    = raw_total * 100.0 / 90.0
+    grade_letter = scaled >= 90.0 ? "A+" : scaled >= 80.0 ? "A" : scaled >= 70.0 ? "A-" : scaled >= 60.0 ? "B+" : "B"
+    [grade_letter, scaled, vp_pts, vol_pts, regime_pts, vwap_pts]
+
+// Pre-compute ta.* every bar for state consistency
+g_avg_vol  = ta.sma(volume, 20)
+g_atr20    = ta.atr(20)
+g_vwap_val = ta.vwap
+
+var string grade_str    = "—"
+var float  grade_score  = na
+var float  grade_vp     = na
+var float  grade_vol    = na
+var float  grade_regime = na
+var float  grade_vwap   = na
+var int    grade_side   = 0
+
+tz = "America/New_York"
+hh = hour(time, tz)
+mm = minute(time, tz)
+
+is_or_bar           = hh == 9 and mm == 30
+on_first_window_bar = is_or_bar[1]
+in_window           = (hh == 9 and mm > 30) or (hh == 10)
+is_session_close    = hh == 11 and mm == 0
+in_date_window      = not i_use_filter or (time >= i_start and time <= i_end)
+
+// ── Strategy state (replicated from the production strategy) ──
+var float or_high      = na
+var float or_low       = na
+var bool  armed        = false
+var int   trades_today = 0
+
+// Triggers + brackets armed for the session
+var float long_trigger  = na
+var float short_trigger = na
+var float long_sl       = na
+var float long_tp       = na
+var float short_sl      = na
+var float short_tp      = na
+
+// Manual position tracking (we don't have strategy.position_size in an indicator)
+var int   pos_dir        = 0       // 1 = long, -1 = short, 0 = flat
+var float pos_entry_price = na
+
+// On OR bar — capture range, reset daily state
+if is_or_bar
+    or_high := high
+    or_low  := low
+    armed   := false
+    trades_today := 0
+    pos_dir := 0
+    pos_entry_price := na
+    grade_str    := "—"
+    grade_score  := na
+    grade_vp     := na
+    grade_vol    := na
+    grade_regime := na
+    grade_vwap   := na
+    grade_side   := 0
+
+// On first trade-window bar — arm triggers
+if on_first_window_bar and in_date_window and not na(or_high) and not na(or_low) and not armed
+    long_trigger  := or_high + tick
+    short_trigger := or_low  - tick
+    long_sl       := long_trigger  - sl_pts
+    long_tp       := long_trigger  + tp_pts
+    short_sl      := short_trigger + sl_pts
+    short_tp      := short_trigger - tp_pts
+    armed := true
+
+// Detect fills — we replicate the strategy's stop-entry behavior:
+//   LONG fills when high >= long_trigger while flat
+//   SHORT fills when low <= short_trigger while flat
+// One-trade-per-day — once a fill happens, no more entries until next OR bar.
+long_just_filled  = armed and pos_dir == 0 and trades_today == 0 and in_window and not na(long_trigger)  and high >= long_trigger
+short_just_filled = armed and pos_dir == 0 and trades_today == 0 and in_window and not na(short_trigger) and low  <= short_trigger
+
+if long_just_filled
+    pos_dir := 1
+    pos_entry_price := long_trigger
+    trades_today := 1
+    [_g, _s, _vp, _vo, _rg, _vw] = compute_setup_grade(1, or_high, or_low, long_trigger, sl_pts, tp_pts, g_avg_vol, g_atr20, g_vwap_val)
+    grade_str    := _g
+    grade_score  := _s
+    grade_vp     := _vp
+    grade_vol    := _vo
+    grade_regime := _rg
+    grade_vwap   := _vw
+    grade_side   := 1
+if short_just_filled
+    pos_dir := -1
+    pos_entry_price := short_trigger
+    trades_today := 1
+    [_g, _s, _vp, _vo, _rg, _vw] = compute_setup_grade(-1, or_high, or_low, short_trigger, sl_pts, tp_pts, g_avg_vol, g_atr20, g_vwap_val)
+    grade_str    := _g
+    grade_score  := _s
+    grade_vp     := _vp
+    grade_vol    := _vo
+    grade_regime := _rg
+    grade_vwap   := _vw
+    grade_side   := -1
+
+// Detect exits — TP / SL / session-close
+long_tp_hit  = pos_dir == 1  and high >= long_tp
+long_sl_hit  = pos_dir == 1  and low  <= long_sl
+short_tp_hit = pos_dir == -1 and low  <= short_tp
+short_sl_hit = pos_dir == -1 and high >= short_sl
+session_flat = pos_dir != 0  and is_session_close
+
+if long_tp_hit or long_sl_hit
+    pos_dir := 0
+if short_tp_hit or short_sl_hit
+    pos_dir := 0
+if session_flat
+    pos_dir := 0
+
+// ── Visuals ──
+bgcolor(is_or_bar ? col_or_bg : na, title="OR BG")
+
+// OR levels drawn as persistent horizontal lines per session — stay visible
+// all day (and across history) instead of vanishing after the breakout window.
+// Extends ~24 bars (12h on 30m) past OR completion so the levels remain on
+// chart through the rest of the trading day.
+if on_first_window_bar and in_date_window and not na(or_high) and not na(or_low)
+    line.new(bar_index, or_high, bar_index + 24, or_high,
+         color=col_or_high, width=2, extend=extend.none)
+    line.new(bar_index, or_low,  bar_index + 24, or_low,
+         color=col_or_low,  width=2, extend=extend.none)
+
+plotshape(long_just_filled,  "Long Fill",  shape.triangleup,   location.belowbar, col_long,  size=size.small, text="L")
+plotshape(short_just_filled, "Short Fill", shape.triangledown, location.abovebar, col_short, size=size.small, text="S")
+
+// Optional bracket lines on fill
+if show_brackets and long_just_filled
+    line.new(bar_index, long_trigger, bar_index + 30, long_trigger, color=col_long, width=2)
+    line.new(bar_index, long_sl,      bar_index + 30, long_sl,      color=col_short, width=1, style=line.style_dotted)
+    line.new(bar_index, long_tp,      bar_index + 30, long_tp,      color=col_long,  width=1, style=line.style_dotted)
+if show_brackets and short_just_filled
+    line.new(bar_index, short_trigger, bar_index + 30, short_trigger, color=col_short, width=2)
+    line.new(bar_index, short_sl,      bar_index + 30, short_sl,      color=col_long,  width=1, style=line.style_dotted)
+    line.new(bar_index, short_tp,      bar_index + 30, short_tp,      color=col_short, width=1, style=line.style_dotted)
+
+// Exit markers
+plotshape(long_tp_hit,  "Long TP",  shape.flag, location.abovebar, col_long,  size=size.tiny, text="TP")
+plotshape(long_sl_hit,  "Long SL",  shape.xcross, location.belowbar, col_short, size=size.tiny, text="SL")
+plotshape(short_tp_hit, "Short TP", shape.flag, location.belowbar, col_short, size=size.tiny, text="TP")
+plotshape(short_sl_hit, "Short SL", shape.xcross, location.abovebar, col_long,  size=size.tiny, text="SL")
+plotshape(session_flat, "EoS",      shape.diamond, location.absolute, color.gray, size=size.tiny, text="EoS")
+
+// ── Dashboard ──
+var table dash = table.new(position.top_right, 2, 7,
+     bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 50))
+
+if barstate.islast
+    title_bg = color.new(color.navy, 30)
+    row_bg   = color.new(color.black, 40)
+
+    pos_text  = pos_dir > 0 ? "LONG" : pos_dir < 0 ? "SHORT" : "Flat"
+    pos_color = pos_dir > 0 ? col_long : pos_dir < 0 ? col_short : color.gray
+    or_text   = (na(or_high) or na(or_low)) ? "—" : str.tostring(or_low, "#.##") + " / " + str.tostring(or_high, "#.##")
+
+    table.cell(dash, 0, 0, "NOVA VIEWER", text_color=color.white,                    bgcolor=title_bg)
+    table.cell(dash, 1, 0, "v1.0",        text_color=color.new(color.aqua, 0),       bgcolor=title_bg)
+    table.cell(dash, 0, 1, "TF/Symbol",   text_color=color.white,                    bgcolor=row_bg)
+    table.cell(dash, 1, 1, timeframe.period + "m " + syminfo.ticker, text_color=color.white, bgcolor=row_bg)
+    table.cell(dash, 0, 2, "SL/TP",       text_color=color.white,                    bgcolor=row_bg)
+    table.cell(dash, 1, 2, "$" + str.tostring(i_risk_usd, "#") + " / $" + str.tostring(i_reward_usd, "#"), text_color=color.white, bgcolor=row_bg)
+    table.cell(dash, 0, 3, "Status",      text_color=color.white,                    bgcolor=row_bg)
+    table.cell(dash, 1, 3, pos_text,      text_color=pos_color,                      bgcolor=row_bg)
+    table.cell(dash, 0, 4, "Today",       text_color=color.white,                    bgcolor=row_bg)
+    table.cell(dash, 1, 4, trades_today > 0 ? "FIRED" : "waiting",
+         text_color = trades_today > 0 ? color.lime : color.gray, bgcolor=row_bg)
+    table.cell(dash, 0, 5, "OR",          text_color=color.white,                    bgcolor=row_bg)
+    table.cell(dash, 1, 5, or_text,       text_color=color.yellow,                   bgcolor=row_bg)
+    table.cell(dash, 0, 6, "Execution",   text_color=color.white,                    bgcolor=row_bg)
+    table.cell(dash, 1, 6, "NOVA server-side", text_color=color.new(color.aqua, 0),  bgcolor=row_bg)
+
+// ── Setup Grade Box (bottom-right) ────────────────────────────────
+// Mirrors NOVA Master 1:1 — VP / Volume / Regime / VWAP. Locked at fill.
+var table grade_box = table.new(position.bottom_right, 2, 7,
+     bgcolor=color.new(color.black, 15), border_width=1, border_color=color.new(color.gray, 40))
+
+if barstate.islast
+    grade_color = grade_str == "A+" ? color.new(#00ff88, 0) : grade_str == "A" ? color.new(#22dd66, 0) : grade_str == "A-" ? color.new(#88dd44, 0) : grade_str == "B+" ? color.new(#ddcc44, 0) : grade_str == "B" ? color.new(#dd8844, 0) : color.new(color.gray, 0)
+    grade_title_bg = color.new(color.navy, 30)
+    grade_row_bg   = color.new(color.black, 40)
+    side_str       = grade_side > 0 ? "LONG" : grade_side < 0 ? "SHORT" : "—"
+
+    table.cell(grade_box, 0, 0, "SETUP GRADE",          text_color=color.white,  bgcolor=grade_title_bg, text_size=size.small)
+    table.cell(grade_box, 1, 0, side_str,               text_color=grade_side > 0 ? col_long : grade_side < 0 ? col_short : color.gray, bgcolor=grade_title_bg, text_size=size.small)
+    table.cell(grade_box, 0, 1, grade_str,              text_color=grade_color,  bgcolor=grade_row_bg, text_size=size.huge)
+    table.cell(grade_box, 1, 1, na(grade_score) ? "—" : str.tostring(grade_score, "#") + " / 100", text_color=color.white, bgcolor=grade_row_bg, text_size=size.normal)
+    table.cell(grade_box, 0, 2, "Volume Profile",       text_color=color.white,  bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 2, na(grade_vp)     ? "—" : str.tostring(grade_vp,     "#")  + " / 30", text_color=color.new(color.aqua, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 0, 3, "Breakout Volume",      text_color=color.white,  bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 3, na(grade_vol)    ? "—" : str.tostring(grade_vol,    "#")  + " / 25", text_color=color.new(color.aqua, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 0, 4, "OR Width Regime",      text_color=color.white,  bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 4, na(grade_regime) ? "—" : str.tostring(grade_regime, "#")  + " / 20", text_color=color.new(color.aqua, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 0, 5, "VWAP Align",           text_color=color.white,  bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 5, na(grade_vwap)   ? "—" : str.tostring(grade_vwap,   "#")  + " / 15", text_color=color.new(color.aqua, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 0, 6, "Delta (Phase 2)",      text_color=color.new(color.gray, 0), bgcolor=grade_row_bg, text_size=size.tiny)
+    table.cell(grade_box, 1, 6, "—",                    text_color=color.new(color.gray, 0), bgcolor=grade_row_bg, text_size=size.tiny)
