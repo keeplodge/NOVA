@@ -99,6 +99,25 @@ def _now_short() -> str:
 
 # ── Live signal ──────────────────────────────────────────────────────────────
 
+def _grade_badge(grade: str | None) -> tuple[str, str]:
+    """Return (emoji, hero_label) for a grade. Hero label is the bold prefix
+    that goes into the embed title so subscribers see grade FIRST."""
+    if not grade:
+        return ("", "")
+    g = str(grade).upper()
+    if g == "A+":
+        return ("💎", "GRADE A+")
+    if g == "A":
+        return ("⭐", "GRADE A")
+    if g == "A-":
+        return ("✨", "GRADE A-")
+    if g == "B+":
+        return ("🟡", "GRADE B+")
+    if g == "B":
+        return ("🟠", "GRADE B")
+    return ("⚪", f"GRADE {g}")
+
+
 def post_signal_executed(
     enriched: Any,
     dispatch: Any,
@@ -107,22 +126,37 @@ def post_signal_executed(
     """Post a fired signal into #live-signals.
 
     `enriched` is an EnrichedSignal from nova_trading_agents (has action, price,
-    sl, tp, grade, sweep, signal_id, ticker, received_at).
+    sl, tp, grade, score, sweep, signal_id, ticker, received_at).
     `dispatch` is the DispatchResult (has chosen, attempts).
     `fanout_summary` is the dict returned by subscriber_fanout.fanout_signal.
     """
     action = (enriched.action or "").upper()
     is_long = action in ("BUY", "LONG")
     color = NOVA_GREEN if is_long else NOVA_RED
-    title = f"🟢 LONG {enriched.ticker}" if is_long else f"🔴 SHORT {enriched.ticker}"
+    side_emoji = "🟢" if is_long else "🔴"
+    side_word = "LONG" if is_long else "SHORT"
+
+    grade = getattr(enriched, "grade", None)
+    score = getattr(enriched, "score", None)
+    grade_emoji, grade_label = _grade_badge(grade)
+    title = f"{side_emoji} {side_word} {enriched.ticker}"
+    if grade_label:
+        title = f"{side_emoji} {side_word} {enriched.ticker} · {grade_emoji} {grade_label}"
+
+    description = None
+    if grade and score is not None:
+        try:
+            description = f"**{grade_emoji} {grade_label}** · {int(score)}/100"
+        except (TypeError, ValueError):
+            description = f"**{grade_emoji} {grade_label}**"
+    elif grade:
+        description = f"**{grade_emoji} {grade_label}**"
 
     fields = [
         {"name": "Entry",  "value": f"{enriched.price:,.2f}", "inline": True},
         {"name": "Stop",   "value": f"{enriched.sl:,.2f}" if enriched.sl else "—", "inline": True},
         {"name": "Target", "value": f"{enriched.tp:,.2f}" if enriched.tp else "—", "inline": True},
     ]
-    if getattr(enriched, "grade", None):
-        fields.append({"name": "Grade", "value": str(enriched.grade), "inline": True})
     if getattr(enriched, "sweep", None):
         fields.append({"name": "Sweep", "value": str(enriched.sweep), "inline": True})
     if getattr(dispatch, "chosen", None):
@@ -139,13 +173,15 @@ def post_signal_executed(
             fields.append({"name": "Fanout", "value": line, "inline": True})
 
     received_at = getattr(enriched, "received_at", datetime.now(tz=EST))
-    embed = {
+    embed: dict = {
         "title": title,
         "color": color,
         "fields": fields,
         "footer": {"text": f"signal {enriched.signal_id} · {received_at.strftime('%H:%M:%S ET')}"},
         "timestamp": _now_iso(),
     }
+    if description:
+        embed["description"] = description
     return _post("live_signals", embed)
 
 
@@ -346,6 +382,11 @@ def post_eod_recap(
     equity: list[dict] | None = None,
     open_positions: dict | None = None,
     pipeline_note: str | None = None,
+    cohort_pnl: float | None = None,
+    cohort_traders: int | None = None,
+    today_grade: str | None = None,
+    today_grade_score: int | None = None,
+    grade_breakdown: dict | None = None,
 ) -> bool:
     """
     Rich EOD recap. Mirrors the narrative produced by post_eod_recap.py.
@@ -389,6 +430,42 @@ def post_eod_recap(
             "inline": False,
         })
 
+        # Today's setup grade — surface prominently in the recap so the cohort
+        # can correlate grade with outcome over the forward-test window.
+        if today_grade:
+            g_emoji, g_label = _grade_badge(today_grade)
+            grade_value = f"{g_emoji} **{g_label}**"
+            if today_grade_score is not None:
+                try:
+                    grade_value += f" · {int(today_grade_score)}/100"
+                except (TypeError, ValueError):
+                    pass
+            fields.append({
+                "name": "🎯 Today's setup grade",
+                "value": grade_value,
+                "inline": False,
+            })
+
+        # Per-grade running WR (forward-test analysis). Skips silently if no
+        # historical grade data has accumulated yet — typically empty in the
+        # first week of Phase 1, populated from week 2 onward.
+        if grade_breakdown:
+            lines = []
+            for g in ("A+", "A", "A-", "B+", "B"):
+                stats = grade_breakdown.get(g)
+                if not stats: continue
+                trades = int(stats.get("trades", 0))
+                if trades == 0: continue
+                wr = float(stats.get("wr", 0))
+                ge, _ = _grade_badge(g)
+                lines.append(f"{ge} **{g}** — {trades} trade(s), WR **{wr:.0f}%**")
+            if lines:
+                fields.append({
+                    "name": "📊 Per-grade WR (running)",
+                    "value": "\n".join(lines),
+                    "inline": False,
+                })
+
         if equity:
             eq_lines = []
             total_current = 0.0
@@ -410,6 +487,21 @@ def post_eod_recap(
             fields.append({
                 "name": "🎯 Combined progress",
                 "value": f"${total_current:,.2f} of ${total_target:,.0f} target ({combined_pct:.1f}%)",
+                "inline": False,
+            })
+
+        # Cohort outcome — sums all linked cohort fills for today (excludes
+        # founder so this reads as a separate "your fleet" vs "the cohort"
+        # number). Skipped when cohort_pnl is None or no cohort traders today.
+        if cohort_pnl is not None and cohort_traders and cohort_traders > 0:
+            cohort_arrow = "🟢" if cohort_pnl >= 0 else "🔴"
+            avg = cohort_pnl / cohort_traders if cohort_traders else 0
+            fields.append({
+                "name": "👥 Cohort outcome",
+                "value": (
+                    f"{cohort_arrow} **${cohort_pnl:+,.0f}** net across **{cohort_traders}** cohort trader(s) · "
+                    f"avg **${avg:+,.0f}** per account"
+                ),
                 "inline": False,
             })
 

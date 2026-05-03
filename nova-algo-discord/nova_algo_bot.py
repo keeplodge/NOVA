@@ -423,6 +423,68 @@ async def cmd_strategy(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+# ── /grade slash command ────────────────────────────────────────────────────
+
+GRADE_BADGE = {
+    "A+": ("💎", 0x00ff88, "Top quality. Volume confirms, clean LVN above, VWAP aligned, normal regime."),
+    "A":  ("⭐", 0x22dd66, "Strong setup. Most boxes ticked."),
+    "A-": ("✨", 0x88dd44, "Above average. One factor short of A."),
+    "B+": ("🟡", 0xddcc44, "Workable. Usually missing volume confirmation or VWAP alignment."),
+    "B":  ("🟠", 0xdd8844, "Marginal. Either weak volume, wrong-side VWAP, or shock-day regime."),
+}
+
+
+@tree.command(
+    name="grade",
+    description="Today's NOVA setup grade — quality score on the latest fire.",
+    guild=discord.Object(id=GUILD_ID),
+)
+async def cmd_grade(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=False, ephemeral=True)
+    today_str = datetime.now(EST).strftime("%a · %b %d")
+    # Pull latest fire's grade from Railway /status (which reads state["last_signal"])
+    status = _http_get_json(f"{API_BASE}/status") or {}
+    last = status.get("last_signal") or {}
+    grade = last.get("grade")
+    score = last.get("score") or last.get("grade_score")
+    action = (last.get("action") or "").upper()
+    ticker = last.get("ticker") or "NQ1!"
+    recorded_at = last.get("recorded_at") or ""
+    is_today = recorded_at.startswith(datetime.now(EST).strftime("%Y-%m-%d"))
+
+    if not grade or not is_today:
+        embed = discord.Embed(
+            title="🎯 Today's setup grade",
+            color=0x6b7280,
+            description=f"No NOVA fire yet today ({today_str}). Setup grade is computed at the moment of breakout — check back after 10:00 ET if the system fires.",
+        )
+        embed.set_footer(text=f"NOVA Algo · grades A+ → B")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+
+    badge_emoji, color, blurb = GRADE_BADGE.get(grade.upper(), ("⚪", 0x6b7280, "Unknown grade."))
+    score_str = f" · {int(score)}/100" if score is not None else ""
+    embed = discord.Embed(
+        title=f"{badge_emoji} GRADE {grade.upper()}{score_str}",
+        color=color,
+        description=blurb,
+    )
+    embed.add_field(name="Today's fire", value=f"{action} {ticker} @ {last.get('price', '?')}", inline=False)
+    embed.add_field(
+        name="Components",
+        value=(
+            "• Volume Profile (30%) — clear path above breakout\n"
+            "• Breakout Volume (25%) — vs 20-bar avg\n"
+            "• OR Width Regime (20%) — vs 20-day baseline\n"
+            "• VWAP alignment (15%) — trend direction\n"
+            "• _Reserved 10% for delta in Phase 2_"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"NOVA Algo · /grade · auto-graded at fire-time")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 # ── /next-event slash command ───────────────────────────────────────────────
 
 @tree.command(

@@ -1332,6 +1332,12 @@ def discord_eod_post():
     cohort_traders_raw = body.get("cohort_traders")
     cohort_traders = int(cohort_traders_raw) if isinstance(cohort_traders_raw, (int, float)) else None
 
+    # Pine v1.4.2 grader passthrough for the recap embed
+    today_grade = body.get("today_grade") if isinstance(body.get("today_grade"), str) else None
+    today_grade_score_raw = body.get("today_grade_score")
+    today_grade_score = int(today_grade_score_raw) if isinstance(today_grade_score_raw, (int, float)) else None
+    grade_breakdown = body.get("grade_breakdown") if isinstance(body.get("grade_breakdown"), dict) else None
+
     ok = discord_bridge.post_eod_recap(
         trades_today=int(body.get("trades_today", state["trades_today"])),
         wins=int(body.get("wins", 0)),
@@ -1345,6 +1351,9 @@ def discord_eod_post():
         pipeline_note=body.get("pipeline_note"),
         cohort_pnl=cohort_pnl,
         cohort_traders=cohort_traders,
+        today_grade=today_grade,
+        today_grade_score=today_grade_score,
+        grade_breakdown=grade_breakdown,
     )
     return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
 

@@ -214,6 +214,12 @@ def fanout_signal(payload: dict) -> dict:
             entries = []
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+            # Pine v1.4.2 grader fields — pass through if present so the
+            # subscriber's Clerk fill record carries the grade for journal +
+            # EOD recap analysis.
+            _grade = payload.get("grade")
+            _gscore = payload.get("grade_score") if payload.get("grade_score") is not None else payload.get("score")
+
             # Subscriber entries (one per delivered fanout)
             for r in results:
                 if not r.get("ok"):
@@ -231,6 +237,8 @@ def fanout_signal(payload: dict) -> dict:
                     "ts": now_iso,
                     "label": matching_sub.get("accountLabel") if matching_sub else None,
                     "outcome": "filled",
+                    "grade": _grade,
+                    "gradeScore": _gscore,
                 })
 
             # Founder entries — one per eval account so per-account PnL
@@ -250,6 +258,8 @@ def fanout_signal(payload: dict) -> dict:
                             "ts": now_iso,
                             "label": acct.get("label", acct_id),
                             "outcome": "filled",
+                            "grade": _grade,
+                            "gradeScore": _gscore,
                         })
                 except Exception as fe:  # noqa: BLE001
                     print(f"[fanout] founder eval-roster import failed: {fe}")
