@@ -138,6 +138,8 @@ class SignalIntelligence:
             try:    return int(v) if v is not None and v != "" else None
             except (TypeError, ValueError): return None
 
+        # `grade_score` is the Pine v1.4.2 grader's emit key; older payloads
+        # use `score`. Accept both so the field flows through unchanged.
         return EnrichedSignal(
             signal_id   = sig_id,
             received_at = now,
@@ -145,7 +147,7 @@ class SignalIntelligence:
             action      = str(raw.get("action", "")).lower().strip(),
             price       = _f("price") or 0.0,
             grade       = raw.get("grade"),
-            score       = _i("score"),
+            score       = _i("grade_score") or _i("score"),
             sweep       = raw.get("sweep"),
             sl          = _f("sl") or _f("stop_loss"),
             tp          = _f("tp") or _f("take_profit"),

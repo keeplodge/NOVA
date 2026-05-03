@@ -698,6 +698,16 @@ def webhook():
 
     logger.info(f"Raw payload received: {json.dumps(data)}")
 
+    # Grade-aware compact log line for forward-test analysis. Pine v1.4.2+
+    # emits `grade` (A+/A/A-/B+/B) and `grade_score` (0-100) on every entry.
+    _g = data.get("grade")
+    _gs = data.get("grade_score") if data.get("grade_score") is not None else data.get("score")
+    if _g is not None or _gs is not None:
+        logger.info(
+            f"[grader] action={data.get('action')} ticker={data.get('ticker')} "
+            f"grade={_g} score={_gs} comment={data.get('comment')}"
+        )
+
     # 2. Validate required fields
     valid, validation_message = validate_payload(data)
     if not valid:
@@ -1317,6 +1327,11 @@ def discord_eod_post():
     ]
     last_signal = today_signals[0] if today_signals else None
 
+    cohort_pnl_raw = body.get("cohort_pnl")
+    cohort_pnl = float(cohort_pnl_raw) if isinstance(cohort_pnl_raw, (int, float)) else None
+    cohort_traders_raw = body.get("cohort_traders")
+    cohort_traders = int(cohort_traders_raw) if isinstance(cohort_traders_raw, (int, float)) else None
+
     ok = discord_bridge.post_eod_recap(
         trades_today=int(body.get("trades_today", state["trades_today"])),
         wins=int(body.get("wins", 0)),
@@ -1328,6 +1343,8 @@ def discord_eod_post():
         equity=body.get("equity", build_equity_data()),
         open_positions=body.get("open_positions", state["open_positions"]),
         pipeline_note=body.get("pipeline_note"),
+        cohort_pnl=cohort_pnl,
+        cohort_traders=cohort_traders,
     )
     return jsonify({"status": "ok" if ok else "skipped", "posted": bool(ok)}), 200
 

@@ -89,7 +89,9 @@ def insert_trade(payload: dict, session: str, now: datetime) -> int:
         float(payload["be"]) if payload.get("be") else None,
         "open",
         payload.get("grade"),
-        int(payload["score"]) if payload.get("score") else None,
+        # Pine v1.4.2 emits `grade_score`; legacy payloads use `score` — accept both.
+        (int(payload["grade_score"]) if payload.get("grade_score") is not None
+         else (int(payload["score"]) if payload.get("score") is not None else None)),
         payload.get("sweep"),
         payload.get("comment", ""),
         json.dumps(payload),
